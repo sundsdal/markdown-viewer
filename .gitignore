@@ -1,0 +1,5 @@
+Markdown.xcodeproj/
+.build/
+*.o
+*.d
+DerivedData/

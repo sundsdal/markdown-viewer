@@ -1,0 +1,53 @@
+name: Markdown
+options:
+  bundleIdPrefix: com.sverresundsdal
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+
+packages:
+  MarkdownView:
+    url: https://github.com/LiYanan2004/MarkdownView
+    from: 2.0.0
+
+targets:
+  MarkdownViewer:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/MarkdownViewer
+    dependencies:
+      - package: MarkdownView
+    settings:
+      base:
+        PRODUCT_NAME: Markdown
+        PRODUCT_MODULE_NAME: MarkdownViewerApp
+        PRODUCT_BUNDLE_IDENTIFIER: com.sverresundsdal.markdown
+        MARKETING_VERSION: 1.0
+        CURRENT_PROJECT_VERSION: 1
+        SWIFT_VERSION: 5.10
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+    info:
+      path: Info.plist
+      properties:
+        CFBundleName: Markdown
+        CFBundleDisplayName: Markdown
+        NSPrincipalClass: NSApplication
+        NSHighResolutionCapable: true
+        CFBundleIconFile: AppIcon
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Markdown Document
+            CFBundleTypeRole: Viewer
+            LSItemContentTypes:
+              - net.daringfireball.markdown
+              - public.plain-text
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: net.daringfireball.markdown
+            UTTypeConformsTo:
+              - public.plain-text
+            UTTypeDescription: Markdown Document
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - md
+                - markdown
+              public.mime-type: text/markdown
