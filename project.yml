@@ -27,6 +27,11 @@ targets:
         CURRENT_PROJECT_VERSION: 1
         SWIFT_VERSION: 5.10
         MACOSX_DEPLOYMENT_TARGET: "14.0"
+      configs:
+        Release:
+          ENABLE_HARDENED_RUNTIME: YES
+          DEVELOPMENT_TEAM: AD55H7GUAM
+          CODE_SIGN_STYLE: Automatic
     info:
       path: Info.plist
       properties:

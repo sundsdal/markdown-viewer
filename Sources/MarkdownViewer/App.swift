@@ -20,6 +20,7 @@ struct MarkdownViewerApp: App {
         .defaultSize(width: 860, height: 700)
         .commands {
             DebugCommands()
+            ThemeCommands()
         }
 
         Window("Debug Logs", id: "debug-logs") {
@@ -33,7 +34,8 @@ private struct DebugCommands: Commands {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
-        CommandMenu("Debug") {
+        CommandGroup(after: .windowList) {
+            Divider()
             Button("Show Logs") {
                 openWindow(id: "debug-logs")
             }

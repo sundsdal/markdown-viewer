@@ -4,6 +4,7 @@ import MarkdownView
 struct MarkdownDocumentView: View {
     let document: MarkdownDocument
     @AppStorage("fontSize") private var fontSize: Double = 16
+    @AppStorage("codeTheme") private var codeTheme = "auto"
     @State private var isLoaded = false
 
     var body: some View {
@@ -11,7 +12,7 @@ struct MarkdownDocumentView: View {
             if isLoaded {
                 MarkdownView(document.text)
                     .font(.system(size: fontSize), for: .body)
-                    .codeBlockStyle(DefaultCodeBlockStyle.default(lightTheme: "xcode", darkTheme: "dark"))
+                    .codeBlockStyle(DefaultCodeBlockStyle.default(lightTheme: resolvedLightTheme, darkTheme: resolvedDarkTheme))
                     .padding(40)
                     .frame(maxWidth: 800)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -21,7 +22,14 @@ struct MarkdownDocumentView: View {
             }
         }
         .background(.background)
-        .task { isLoaded = true }
+        .task {
+            LogStore.shared.log(
+                "Opened document (\(document.text.utf8.count) bytes)",
+                level: .info,
+                category: "document"
+            )
+            isLoaded = true
+        }
         .toolbar {
             ToolbarItemGroup {
                 Button(action: decreaseFontSize) {
@@ -34,8 +42,22 @@ struct MarkdownDocumentView: View {
         }
     }
 
-    private func decreaseFontSize() { if fontSize > 10 { fontSize -= 2 } }
-    private func increaseFontSize() { if fontSize < 28 { fontSize += 2 } }
+    private var resolvedLightTheme: String { codeTheme == "auto" ? "xcode" : codeTheme }
+    private var resolvedDarkTheme: String  { codeTheme == "auto" ? "atom-one-dark" : codeTheme }
+
+    private func decreaseFontSize() {
+        if fontSize > 10 {
+            fontSize -= 2
+            LogStore.shared.log("Font size → \(Int(fontSize))pt", level: .debug, category: "ui")
+        }
+    }
+
+    private func increaseFontSize() {
+        if fontSize < 28 {
+            fontSize += 2
+            LogStore.shared.log("Font size → \(Int(fontSize))pt", level: .debug, category: "ui")
+        }
+    }
 }
 
 #Preview {
