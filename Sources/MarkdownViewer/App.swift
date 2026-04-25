@@ -19,14 +19,25 @@ struct MarkdownViewerApp: App {
         }
         .defaultSize(width: 860, height: 700)
         .commands {
+            RendererCommands()
             DebugCommands()
-            ThemeCommands()
         }
 
         Window("Debug Logs", id: "debug-logs") {
             DebugLogView()
         }
         .defaultSize(width: 800, height: 500)
+    }
+}
+
+private struct RendererCommands: Commands {
+    @AppStorage("showRendererComparison") private var showRendererComparison = false
+
+    var body: some Commands {
+        CommandGroup(after: .toolbar) {
+            Toggle("Compare Renderers Side by Side", isOn: $showRendererComparison)
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+        }
     }
 }
 
