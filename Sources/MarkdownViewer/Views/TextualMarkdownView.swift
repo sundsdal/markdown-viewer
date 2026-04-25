@@ -36,7 +36,41 @@ struct TextualMarkdownView: View {
     private func textualMarkdown(_ text: String) -> some View {
         StructuredText(markdown: text)
             .font(.system(size: fontSize))
+            .textual.tableStyle(TextualAlternatingTableStyle())
             .textual.textSelection(.enabled)
+    }
+}
+
+private struct TextualAlternatingTableStyle: StructuredText.TableStyle {
+    private static let borderWidth: CGFloat = 1
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .textual.tableCellSpacing(horizontal: Self.borderWidth, vertical: Self.borderWidth)
+            .textual.blockSpacing(.fontScaled(top: 1.6, bottom: 1.6))
+            .textual.tableBackground { layout in
+                Canvas { context, _ in
+                    for row in layout.rowIndices where row > 0 && row.isMultiple(of: 2) {
+                        let bounds = layout.rowBounds(row)
+                        guard !bounds.isNull else { continue }
+                        context.fill(
+                            Path(bounds),
+                            with: .color(Color(nsColor: .controlBackgroundColor))
+                        )
+                    }
+                }
+            }
+            .textual.tableOverlay { layout in
+                Canvas { context, _ in
+                    for divider in layout.dividers() {
+                        context.fill(
+                            Path(divider),
+                            with: .color(Color(nsColor: .separatorColor))
+                        )
+                    }
+                }
+            }
+            .padding(Self.borderWidth)
     }
 }
 

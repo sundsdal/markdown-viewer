@@ -3,7 +3,7 @@ import SwiftUI
 struct MarkdownDocumentView: View {
     let document: MarkdownDocument
     @AppStorage("fontSize") private var fontSize: Double = 16
-    @AppStorage("rendererMode") private var defaultRendererRaw: String = RendererMode.html.rawValue
+    @AppStorage("rendererMode") private var defaultRendererRaw: String = RendererMode.textual.rawValue
     @AppStorage("showRendererComparison") private var showRendererComparison = false
     @SceneStorage("rendererModeLeft")  private var leftRaw:  String = ""
     @SceneStorage("rendererModeRight") private var rightRaw: String = ""
@@ -33,7 +33,7 @@ struct MarkdownDocumentView: View {
     }
 
     private var seededDefault: RendererMode {
-        RendererMode(rawValue: defaultRendererRaw) ?? .html
+        RendererMode(rawValue: defaultRendererRaw) ?? .textual
     }
     private var leftMode: RendererMode {
         RendererMode(rawValue: leftRaw) ?? seededDefault
