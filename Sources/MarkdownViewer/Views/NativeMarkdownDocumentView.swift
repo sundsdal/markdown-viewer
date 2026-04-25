@@ -8,6 +8,7 @@ struct NativeMarkdownDocumentView: View {
     let scrollPosition: RendererScrollPosition
     let scrollApplyToken: UUID
     let source: String
+    let synchronizesScroll: Bool
 
     var body: some View {
         ScrollView {
@@ -26,7 +27,8 @@ struct NativeMarkdownDocumentView: View {
                 NativeScrollPositionObserver(
                     source: source,
                     scrollPosition: scrollPosition,
-                    applyToken: scrollApplyToken
+                    applyToken: scrollApplyToken,
+                    broadcastsScrollUpdates: synchronizesScroll
                 )
             )
         }
@@ -696,7 +698,8 @@ private enum YAMLScalarKind {
         theme: .system,
         scrollPosition: RendererScrollPosition(),
         scrollApplyToken: UUID(),
-        source: "preview"
+        source: "preview",
+        synchronizesScroll: false
     )
     .frame(width: 700, height: 560)
 }

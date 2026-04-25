@@ -9,29 +9,31 @@ struct TextualMarkdownView: View {
     let scrollPosition: RendererScrollPosition
     let scrollApplyToken: UUID
     let source: String
+    let synchronizesScroll: Bool
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 if let frontMatter = FrontMatterDocument.split(from: markdown) {
                     TextualFrontMatterView(yaml: frontMatter.yaml, fontSize: fontSize, theme: theme)
-                    if !frontMatter.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if frontMatter.body.containsNonWhitespace {
                         textualMarkdown(frontMatter.body)
                     }
                 } else {
                     textualMarkdown(markdown)
                 }
             }
-                .frame(maxWidth: 760, alignment: .leading)
-                .padding(.horizontal, 40)
-                .padding(.vertical, 34)
-                .background(
-                    NativeScrollPositionObserver(
-                        source: source,
-                        scrollPosition: scrollPosition,
-                        applyToken: scrollApplyToken
-                    )
+            .frame(maxWidth: 760, alignment: .leading)
+            .padding(.horizontal, 40)
+            .padding(.vertical, 34)
+            .background(
+                NativeScrollPositionObserver(
+                    source: source,
+                    scrollPosition: scrollPosition,
+                    applyToken: scrollApplyToken,
+                    broadcastsScrollUpdates: synchronizesScroll
                 )
+            )
         }
         .background(theme.tokens.documentBackground)
         .modifier(ThemeColorSchemeModifier(theme: theme))
@@ -61,12 +63,7 @@ struct TextualMarkdownView: View {
                     borderColor: DynamicColor(tokens.border)
                 )
             )
-            .textual.highlighterTheme(
-                StructuredText.HighlighterTheme(
-                    foregroundColor: DynamicColor(tokens.foreground),
-                    backgroundColor: DynamicColor(tokens.codeBackground)
-                )
-            )
+            .textual.highlighterTheme(TextualThemedHighlighterTheme.make(from: tokens))
             .textual.codeBlockStyle(TextualThemedCodeBlockStyle(theme: theme))
             .textual.thematicBreakStyle(TextualThemedThematicBreakStyle(theme: theme))
             .textual.tableCellStyle(TextualCompactTableCellStyle(fontSize: fontSize))
@@ -77,22 +74,131 @@ struct TextualMarkdownView: View {
     @ViewBuilder
     private func structuredText(_ text: String) -> some View {
         if showsColorSwatches {
-            StructuredText(text, parser: TextualColorSwatchParser())
+            StructuredText(text, parser: TextualCachingMarkdownParser(mode: .colorSwatches))
         } else {
-            StructuredText(markdown: text)
+            StructuredText(text, parser: TextualCachingMarkdownParser(mode: .markdown))
         }
     }
 }
 
-private struct TextualColorSwatchParser: MarkupParser {
-    private let markdownParser = AttributedStringMarkdownParser.markdown()
-
-    func attributedString(for input: String) throws -> AttributedString {
-        let attributedString = try markdownParser.attributedString(for: input)
-        return Self.insertingSwatches(in: attributedString)
+private struct TextualCachingMarkdownParser: MarkupParser {
+    enum Mode: Hashable {
+        case markdown
+        case colorSwatches
     }
 
-    private static func insertingSwatches(in attributedString: AttributedString) -> AttributedString {
+    let mode: Mode
+
+    func attributedString(for input: String) throws -> AttributedString {
+        try TextualAttributedStringCache.shared.attributedString(for: input, mode: mode) {
+            let attributedString = TextualCodeBlockLanguageHints.limitingExpensiveHighlightHints(
+                in: try AttributedStringMarkdownParser.markdown().attributedString(for: input)
+            )
+            switch mode {
+            case .markdown:
+                return attributedString
+            case .colorSwatches:
+                return TextualColorSwatchParser.insertingSwatches(in: attributedString, source: input)
+            }
+        }
+    }
+}
+
+private enum TextualCodeBlockLanguageHints {
+    private static let maxHighlightedCodeBlockCharacters = 12_000
+
+    static func limitingExpensiveHighlightHints(in attributedString: AttributedString) -> AttributedString {
+        var output = attributedString
+        let replacements: [(Range<AttributedString.Index>, PresentationIntent)] = attributedString.runs.compactMap { run in
+            guard attributedString[run.range].characters.count > maxHighlightedCodeBlockCharacters else {
+                return nil
+            }
+            guard let intent = run.presentationIntent,
+                  let replacement = intent.removingExpensiveCodeBlockLanguageHints else {
+                return nil
+            }
+            return (run.range, replacement)
+        }
+
+        for (range, replacement) in replacements {
+            output[range].presentationIntent = replacement
+        }
+
+        return output
+    }
+}
+
+private extension PresentationIntent {
+    var removingExpensiveCodeBlockLanguageHints: PresentationIntent? {
+        var rebuilt: PresentationIntent?
+        var changed = false
+
+        for component in components.reversed() {
+            let kind: PresentationIntent.Kind
+            switch component.kind {
+            case .codeBlock(let languageHint) where languageHint?.lowercased() != "math":
+                kind = .codeBlock(languageHint: nil)
+                changed = changed || languageHint != nil
+            default:
+                kind = component.kind
+            }
+            rebuilt = PresentationIntent(kind, identity: component.identity, parent: rebuilt)
+        }
+
+        return changed ? rebuilt : nil
+    }
+}
+
+@MainActor
+private final class TextualAttributedStringCache {
+    static let shared = TextualAttributedStringCache()
+
+    private struct Key: Hashable {
+        let input: String
+        let mode: TextualCachingMarkdownParser.Mode
+    }
+
+    private let limit = 12
+    private var values: [Key: AttributedString] = [:]
+    private var recentKeys: [Key] = []
+
+    func attributedString(
+        for input: String,
+        mode: TextualCachingMarkdownParser.Mode,
+        build: () throws -> AttributedString
+    ) throws -> AttributedString {
+        let key = Key(input: input, mode: mode)
+        if let cached = values[key] {
+            markRecentlyUsed(key)
+            return cached
+        }
+
+        let attributedString = try build()
+        values[key] = attributedString
+        markRecentlyUsed(key)
+        trimIfNeeded()
+        return attributedString
+    }
+
+    private func markRecentlyUsed(_ key: Key) {
+        recentKeys.removeAll { $0 == key }
+        recentKeys.append(key)
+    }
+
+    private func trimIfNeeded() {
+        while recentKeys.count > limit, let key = recentKeys.first {
+            recentKeys.removeFirst()
+            values.removeValue(forKey: key)
+        }
+    }
+}
+
+private enum TextualColorSwatchParser {
+    static func insertingSwatches(in attributedString: AttributedString, source: String) -> AttributedString {
+        guard source.contains("#") else {
+            return attributedString
+        }
+
         var output = AttributedString()
 
         for run in attributedString.runs {
@@ -102,6 +208,11 @@ private struct TextualColorSwatchParser: MarkupParser {
             }
 
             let text = String(attributedString[run.range].characters)
+            guard text.contains("#") else {
+                output.append(attributedString[run.range])
+                continue
+            }
+
             let matches = HexColorLiteral.matches(in: text)
 
             guard !matches.isEmpty else {
@@ -310,6 +421,58 @@ private extension PresentationIntent.Kind {
     }
 }
 
+private enum TextualThemedHighlighterTheme {
+    static func make(from tokens: MarkdownThemeTokens) -> StructuredText.HighlighterTheme {
+        let keyword = AnyTextProperty(
+            .foregroundColor(DynamicColor(tokens.syntaxKeyword)),
+            .fontWeight(.semibold)
+        )
+        let literal = AnyTextProperty(
+            .foregroundColor(DynamicColor(tokens.syntaxBoolean)),
+            .fontWeight(.semibold)
+        )
+        let string = AnyTextProperty(.foregroundColor(DynamicColor(tokens.syntaxString)))
+        let number = AnyTextProperty(.foregroundColor(DynamicColor(tokens.syntaxNumber)))
+        let comment = AnyTextProperty(.foregroundColor(DynamicColor(tokens.syntaxComment)))
+        let property = AnyTextProperty(.foregroundColor(DynamicColor(tokens.syntaxKey)))
+        let punctuation = AnyTextProperty(.foregroundColor(DynamicColor(tokens.syntaxPunctuation)))
+
+        return StructuredText.HighlighterTheme(
+            foregroundColor: DynamicColor(tokens.foreground),
+            backgroundColor: DynamicColor(tokens.codeBackground),
+            tokenProperties: [
+                .keyword: keyword,
+                .builtin: keyword,
+                .literal: literal,
+                .boolean: literal,
+                .nil: literal,
+                .string: string,
+                .char: string,
+                .regex: string,
+                .url: AnyTextProperty(.foregroundColor(DynamicColor(tokens.link))),
+                .number: number,
+                .symbol: number,
+                .comment: comment,
+                .blockComment: comment,
+                .docComment: comment,
+                .property: property,
+                .attributeName: property,
+                .className: property,
+                .variable: AnyTextProperty(.foregroundColor(DynamicColor(tokens.foreground))),
+                .constant: AnyTextProperty(.foregroundColor(DynamicColor(tokens.foreground))),
+                .function: AnyTextProperty(.foregroundColor(DynamicColor(tokens.foreground))),
+                .functionName: AnyTextProperty(.foregroundColor(DynamicColor(tokens.foreground))),
+                .punctuation: punctuation,
+                .operator: punctuation,
+                .tag: keyword,
+                .preprocessor: keyword,
+                .directive: keyword,
+                .attribute: property,
+            ]
+        )
+    }
+}
+
 private struct TextualThemedCodeBlockStyle: StructuredText.CodeBlockStyle {
     let theme: MarkdownTheme
 
@@ -405,20 +568,40 @@ private struct FrontMatterDocument {
     let body: String
 
     static func split(from text: String) -> FrontMatterDocument? {
-        let textWithoutBOM = text.hasPrefix("\u{feff}") ? String(text.dropFirst()) : text
-        let lines = textWithoutBOM.components(separatedBy: "\n")
+        var firstLineStart = text.startIndex
+        if text[firstLineStart...].first == "\u{feff}" {
+            firstLineStart = text.index(after: firstLineStart)
+        }
 
-        guard lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == "---" else {
+        let firstLineEnd = text[firstLineStart...].firstIndex(of: "\n") ?? text.endIndex
+        guard text[firstLineStart..<firstLineEnd].trimmingCharacters(in: .whitespacesAndNewlines) == "---",
+              firstLineEnd < text.endIndex else {
             return nil
         }
 
-        for index in lines.indices.dropFirst() {
-            let trimmed = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+        let yamlStart = text.index(after: firstLineEnd)
+        var lineStart = yamlStart
+
+        while lineStart < text.endIndex {
+            let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
+            let trimmed = text[lineStart..<lineEnd].trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed == "---" || trimmed == "..." {
-                let yaml = lines[1..<index].joined(separator: "\n")
-                let body = index + 1 < lines.count ? lines[(index + 1)...].joined(separator: "\n") : ""
+                let bodyStart = lineEnd < text.endIndex ? text.index(after: lineEnd) : text.endIndex
+                var yaml = String(text[yamlStart..<lineStart])
+                if yaml.hasSuffix("\n") {
+                    yaml.removeLast()
+                }
+                if yaml.hasSuffix("\r") {
+                    yaml.removeLast()
+                }
+                let body = String(text[bodyStart..<text.endIndex])
                 return FrontMatterDocument(yaml: yaml, body: body)
             }
+
+            guard lineEnd < text.endIndex else {
+                break
+            }
+            lineStart = text.index(after: lineEnd)
         }
 
         return nil
@@ -429,6 +612,14 @@ private struct TextualFrontMatterView: View {
     let yaml: String
     let fontSize: Double
     let theme: MarkdownTheme
+    private let yamlCodeBlock: String
+
+    init(yaml: String, fontSize: Double, theme: MarkdownTheme) {
+        self.yaml = yaml
+        self.fontSize = fontSize
+        self.theme = theme
+        self.yamlCodeBlock = Self.yamlCodeBlock(for: yaml)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -445,7 +636,7 @@ private struct TextualFrontMatterView: View {
             .padding(.vertical, 9)
             .background(theme.tokens.frontMatterHeaderBackground)
 
-            StructuredText(markdown: yamlCodeBlock)
+            StructuredText(yamlCodeBlock, parser: TextualCachingMarkdownParser(mode: .markdown))
                 .font(.system(size: FrontMatterTypography.codeSize(for: fontSize), design: .monospaced))
                 .foregroundStyle(theme.tokens.frontMatterText)
                 .textual.codeBlockStyle(TextualFrontMatterCodeBlockStyle(fontSize: fontSize, theme: theme))
@@ -465,12 +656,12 @@ private struct TextualFrontMatterView: View {
         }
     }
 
-    private var yamlCodeBlock: String {
+    private static func yamlCodeBlock(for yaml: String) -> String {
         let fence = String(repeating: "`", count: max(3, longestBacktickRun(in: yaml) + 1))
         return "\(fence)yaml\n\(yaml)\n\(fence)"
     }
 
-    private func longestBacktickRun(in text: String) -> Int {
+    private static func longestBacktickRun(in text: String) -> Int {
         var longest = 0
         var current = 0
 
@@ -502,5 +693,11 @@ private struct TextualFrontMatterCodeBlockStyle: StructuredText.CodeBlockStyle {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
             .background(tokens.frontMatterBlockBackground)
+    }
+}
+
+private extension String {
+    var containsNonWhitespace: Bool {
+        contains { !$0.isWhitespace }
     }
 }

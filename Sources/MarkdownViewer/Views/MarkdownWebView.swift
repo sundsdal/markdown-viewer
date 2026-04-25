@@ -8,6 +8,7 @@ struct MarkdownWebView: NSViewRepresentable {
     let scrollPosition: RendererScrollPosition
     let scrollApplyToken: UUID
     let source: String
+    let synchronizesScroll: Bool
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -25,6 +26,7 @@ struct MarkdownWebView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.scrollPosition = scrollPosition
         context.coordinator.source = source
+        context.coordinator.synchronizesScroll = synchronizesScroll
         let signature = documentSignature(markdown: markdown, fontSize: fontSize)
 
         if context.coordinator.loadedDocumentSignature != signature {
@@ -42,21 +44,27 @@ struct MarkdownWebView: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(scrollPosition: scrollPosition, source: source)
+        Coordinator(
+            scrollPosition: scrollPosition,
+            source: source,
+            synchronizesScroll: synchronizesScroll
+        )
     }
 
     class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         weak var webView: WKWebView?
         var scrollPosition: RendererScrollPosition
         var source: String
+        var synchronizesScroll: Bool
         var loadedDocumentSignature: String?
         var lastApplyToken: UUID?
         var lastTheme: MarkdownTheme?
         private var isApplyingScroll = false
 
-        init(scrollPosition: RendererScrollPosition, source: String) {
+        init(scrollPosition: RendererScrollPosition, source: String, synchronizesScroll: Bool) {
             self.scrollPosition = scrollPosition
             self.source = source
+            self.synchronizesScroll = synchronizesScroll
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -70,7 +78,11 @@ struct MarkdownWebView: NSViewRepresentable {
                   let fraction = body["fraction"] as? Double else {
                 return
             }
-            scrollPosition.update(fraction: CGFloat(fraction), source: source)
+            scrollPosition.update(
+                fraction: CGFloat(fraction),
+                source: source,
+                broadcast: synchronizesScroll
+            )
         }
 
         func applyScrollPositionIfNeeded() {

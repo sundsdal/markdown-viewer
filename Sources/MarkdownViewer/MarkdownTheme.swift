@@ -288,12 +288,20 @@ struct MarkdownThemeTokens {
     let frontMatterNull: Color
     let frontMatterPunctuation: Color
     let frontMatterBlockBackground: Color
+    let syntaxComment: Color
+    let syntaxKeyword: Color
+    let syntaxString: Color
+    let syntaxNumber: Color
+    let syntaxBoolean: Color
+    let syntaxPunctuation: Color
+    let syntaxKey: Color
 
     let cssVariables: String
 
     fileprivate init(description: MarkdownThemeDescription, usesSystemNativeColors: Bool) {
         let content = description.content
         let frontmatter = description.frontmatter
+        let syntax = description.syntax
 
         if usesSystemNativeColors {
             documentBackground = Color(nsColor: .textBackgroundColor)
@@ -318,6 +326,13 @@ struct MarkdownThemeTokens {
             frontMatterNull = Color(red: 0.58, green: 0.20, blue: 0.92)
             frontMatterPunctuation = Color(nsColor: .secondaryLabelColor)
             frontMatterBlockBackground = Color(nsColor: .textBackgroundColor)
+            syntaxComment = Color(red: 0.42, green: 0.45, blue: 0.49)
+            syntaxKeyword = Color(red: 0.84, green: 0.23, blue: 0.29)
+            syntaxString = Color(red: 0.01, green: 0.18, blue: 0.38)
+            syntaxNumber = Color(red: 0.00, green: 0.36, blue: 0.77)
+            syntaxBoolean = Color(red: 0.00, green: 0.36, blue: 0.77)
+            syntaxPunctuation = Color(nsColor: .secondaryLabelColor)
+            syntaxKey = Color(red: 0.06, green: 0.37, blue: 0.55)
         } else {
             documentBackground = Color(cssColor: content.background)
             foreground = Color(cssColor: content.foreground)
@@ -341,6 +356,13 @@ struct MarkdownThemeTokens {
             frontMatterNull = Color(cssColor: frontmatter.null)
             frontMatterPunctuation = Color(cssColor: frontmatter.punctuation)
             frontMatterBlockBackground = Color(cssColor: frontmatter.blockBackground)
+            syntaxComment = Color(cssColor: syntax.comment)
+            syntaxKeyword = Color(cssColor: syntax.keyword)
+            syntaxString = Color(cssColor: syntax.string)
+            syntaxNumber = Color(cssColor: syntax.number)
+            syntaxBoolean = Color(cssColor: syntax.boolean)
+            syntaxPunctuation = Color(cssColor: syntax.punctuation)
+            syntaxKey = Color(cssColor: syntax.key)
         }
 
         cssVariables = description.cssVariables

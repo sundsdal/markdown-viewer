@@ -5,11 +5,13 @@ final class RendererScrollPosition: ObservableObject {
     var activeSource: String?
     @Published var applyToken = UUID()
 
-    func update(fraction: CGFloat, source: String) {
+    func update(fraction: CGFloat, source: String, broadcast: Bool = true) {
         guard fraction.isFinite else { return }
         self.fraction = min(max(fraction, 0), 1)
         activeSource = source
-        applyToken = UUID()
+        if broadcast {
+            applyToken = UUID()
+        }
     }
 
     func requestApply(source: String? = nil) {
@@ -22,6 +24,7 @@ struct NativeScrollPositionObserver: NSViewRepresentable {
     let source: String
     let scrollPosition: RendererScrollPosition
     let applyToken: UUID
+    let broadcastsScrollUpdates: Bool
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
@@ -35,6 +38,7 @@ struct NativeScrollPositionObserver: NSViewRepresentable {
     func updateNSView(_ view: NSView, context: Context) {
         context.coordinator.source = source
         context.coordinator.scrollPosition = scrollPosition
+        context.coordinator.broadcastsScrollUpdates = broadcastsScrollUpdates
         DispatchQueue.main.async {
             context.coordinator.attach(from: view)
             context.coordinator.applyScrollPositionIfNeeded(applyToken: applyToken)
@@ -42,20 +46,26 @@ struct NativeScrollPositionObserver: NSViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(source: source, scrollPosition: scrollPosition)
+        Coordinator(
+            source: source,
+            scrollPosition: scrollPosition,
+            broadcastsScrollUpdates: broadcastsScrollUpdates
+        )
     }
 
     final class Coordinator {
         var source: String
         var scrollPosition: RendererScrollPosition
+        var broadcastsScrollUpdates: Bool
         private weak var scrollView: NSScrollView?
         private var observer: NSObjectProtocol?
         private var isApplying = false
         private var lastApplyToken: UUID?
 
-        init(source: String, scrollPosition: RendererScrollPosition) {
+        init(source: String, scrollPosition: RendererScrollPosition, broadcastsScrollUpdates: Bool) {
             self.source = source
             self.scrollPosition = scrollPosition
+            self.broadcastsScrollUpdates = broadcastsScrollUpdates
         }
 
         deinit {
@@ -100,7 +110,11 @@ struct NativeScrollPositionObserver: NSViewRepresentable {
 
         private func recordScrollPosition() {
             guard !isApplying, let scrollView else { return }
-            scrollPosition.update(fraction: currentFraction(in: scrollView), source: source)
+            scrollPosition.update(
+                fraction: currentFraction(in: scrollView),
+                source: source,
+                broadcast: broadcastsScrollUpdates
+            )
         }
 
         private func scroll(to fraction: CGFloat, in scrollView: NSScrollView) {

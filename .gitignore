@@ -1,5 +1,6 @@
 Markdown.xcodeproj/
 .build/
+build/
 *.o
 *.d
 DerivedData/

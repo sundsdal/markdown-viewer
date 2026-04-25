@@ -198,7 +198,8 @@ struct MarkdownDocumentView: View {
                 theme: selectedTheme,
                 scrollPosition: scrollPosition,
                 scrollApplyToken: scrollPosition.applyToken,
-                source: source
+                source: source,
+                synchronizesScroll: showRendererComparison
             )
         case .markdownUI:
             NativeMarkdownDocumentView(
@@ -207,7 +208,8 @@ struct MarkdownDocumentView: View {
                 theme: selectedTheme,
                 scrollPosition: scrollPosition,
                 scrollApplyToken: scrollPosition.applyToken,
-                source: source
+                source: source,
+                synchronizesScroll: showRendererComparison
             )
         case .textual:
             TextualMarkdownView(
@@ -217,7 +219,8 @@ struct MarkdownDocumentView: View {
                 theme: selectedTheme,
                 scrollPosition: scrollPosition,
                 scrollApplyToken: scrollPosition.applyToken,
-                source: source
+                source: source,
+                synchronizesScroll: showRendererComparison
             )
         case .swiftUIMarkdown:
             SwiftUIMarkdownView(
@@ -226,7 +229,8 @@ struct MarkdownDocumentView: View {
                 theme: selectedTheme,
                 scrollPosition: scrollPosition,
                 scrollApplyToken: scrollPosition.applyToken,
-                source: source
+                source: source,
+                synchronizesScroll: showRendererComparison
             )
         }
     }

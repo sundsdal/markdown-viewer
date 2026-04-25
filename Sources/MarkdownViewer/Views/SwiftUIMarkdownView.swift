@@ -18,6 +18,7 @@ struct SwiftUIMarkdownView: View {
     let scrollPosition: RendererScrollPosition
     let scrollApplyToken: UUID
     let source: String
+    let synchronizesScroll: Bool
 
     @State private var content: String = ""
 
@@ -29,7 +30,8 @@ struct SwiftUIMarkdownView: View {
                     theme: theme,
                     scrollPosition: scrollPosition,
                     applyToken: scrollApplyToken,
-                    source: source
+                    source: source,
+                    synchronizesScroll: synchronizesScroll
                 )
             )
             .background(theme.tokens.documentBackground)
@@ -90,12 +92,14 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
     let scrollPosition: RendererScrollPosition
     let applyToken: UUID
     let source: String
+    let synchronizesScroll: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             scrollPosition: scrollPosition,
             source: source,
-            handlerName: "paneScrollBridge_\(source)"
+            handlerName: "paneScrollBridge_\(source)",
+            synchronizesScroll: synchronizesScroll
         )
     }
 
@@ -114,6 +118,7 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
     func updateNSView(_ view: NSView, context: Context) {
         context.coordinator.scrollPosition = scrollPosition
         context.coordinator.source = source
+        context.coordinator.synchronizesScroll = synchronizesScroll
         context.coordinator.scheduleAttachAndApply(
             fontSize: fontSize,
             theme: theme,
@@ -126,6 +131,7 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
         var scrollPosition: RendererScrollPosition
         var source: String
         let handlerName: String
+        var synchronizesScroll: Bool
         weak var bridgeView: NSView?
 
         private weak var webView: WKWebView?
@@ -137,10 +143,16 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
         private var lastApplyToken: UUID?
         private var isApplyingScroll = false
 
-        init(scrollPosition: RendererScrollPosition, source: String, handlerName: String) {
+        init(
+            scrollPosition: RendererScrollPosition,
+            source: String,
+            handlerName: String,
+            synchronizesScroll: Bool
+        ) {
             self.scrollPosition = scrollPosition
             self.source = source
             self.handlerName = handlerName
+            self.synchronizesScroll = synchronizesScroll
         }
 
         deinit {
@@ -413,7 +425,11 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
 
         private func recordNativeScrollPosition() {
             guard !isApplyingScroll, let webScrollView else { return }
-            scrollPosition.update(fraction: currentFraction(in: webScrollView), source: source)
+            scrollPosition.update(
+                fraction: currentFraction(in: webScrollView),
+                source: source,
+                broadcast: synchronizesScroll
+            )
         }
 
         private func scroll(to fraction: CGFloat, in scrollView: NSScrollView) {
@@ -444,7 +460,11 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
                   let fraction = body["fraction"] as? Double else {
                 return
             }
-            scrollPosition.update(fraction: CGFloat(fraction), source: source)
+            scrollPosition.update(
+                fraction: CGFloat(fraction),
+                source: source,
+                broadcast: synchronizesScroll
+            )
         }
     }
 }
