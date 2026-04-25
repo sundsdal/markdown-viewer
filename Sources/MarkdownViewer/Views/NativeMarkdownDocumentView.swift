@@ -4,6 +4,7 @@ import MarkdownUI
 struct NativeMarkdownDocumentView: View {
     let document: MarkdownDocument
     let fontSize: Double
+    let theme: MarkdownTheme
     let scrollPosition: RendererScrollPosition
     let scrollApplyToken: UUID
     let source: String
@@ -12,7 +13,7 @@ struct NativeMarkdownDocumentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 if let frontMatter = frontMatterDocument {
-                    YAMLFrontMatterView(yaml: frontMatter.yaml)
+                    YAMLFrontMatterView(yaml: frontMatter.yaml, fontSize: fontSize, theme: theme)
                     markdownView(frontMatter.body)
                 } else {
                     markdownView(renderableText)
@@ -29,6 +30,8 @@ struct NativeMarkdownDocumentView: View {
                 )
             )
         }
+        .background(theme.tokens.documentBackground)
+        .modifier(ThemeColorSchemeModifier(theme: theme))
     }
 
     private var frontMatterDocument: FrontMatterDocument? {
@@ -49,12 +52,161 @@ struct NativeMarkdownDocumentView: View {
 
     private func markdownView(_ text: String) -> some View {
         Markdown(text)
-            .markdownTheme(.gitHub.text {
-                ForegroundColor(.primary)
+            .markdownTheme(MarkdownUIThemeBuilder.build(for: theme, fontSize: fontSize))
+            .tint(theme.tokens.link)
+            .textSelection(.enabled)
+    }
+}
+
+private enum MarkdownUIThemeBuilder {
+    static func build(for theme: MarkdownTheme, fontSize: Double) -> Theme {
+        let tokens = theme.tokens
+        return Theme()
+            .text {
+                ForegroundColor(tokens.foreground)
                 BackgroundColor(.clear)
                 FontSize(CGFloat(fontSize))
-            })
-            .textSelection(.enabled)
+            }
+            .code {
+                FontFamilyVariant(.monospaced)
+                FontSize(.em(0.85))
+                ForegroundColor(tokens.inlineCodeForeground)
+                BackgroundColor(tokens.inlineCodeBackground)
+            }
+            .strong { FontWeight(.semibold) }
+            .link { ForegroundColor(tokens.link) }
+            .heading1 { configuration in
+                VStack(alignment: .leading, spacing: 0) {
+                    configuration.label
+                        .relativePadding(.bottom, length: .em(0.3))
+                        .relativeLineSpacing(.em(0.125))
+                        .markdownMargin(top: 24, bottom: 16)
+                        .markdownTextStyle {
+                            FontWeight(.semibold)
+                            FontSize(.em(2))
+                        }
+                    Divider().overlay(tokens.border)
+                }
+            }
+            .heading2 { configuration in
+                VStack(alignment: .leading, spacing: 0) {
+                    configuration.label
+                        .relativePadding(.bottom, length: .em(0.3))
+                        .relativeLineSpacing(.em(0.125))
+                        .markdownMargin(top: 24, bottom: 16)
+                        .markdownTextStyle {
+                            FontWeight(.semibold)
+                            FontSize(.em(1.5))
+                        }
+                    Divider().overlay(tokens.border)
+                }
+            }
+            .heading3 { configuration in
+                configuration.label
+                    .relativeLineSpacing(.em(0.125))
+                    .markdownMargin(top: 24, bottom: 16)
+                    .markdownTextStyle {
+                        FontWeight(.semibold)
+                        FontSize(.em(1.25))
+                    }
+            }
+            .heading4 { configuration in
+                configuration.label
+                    .relativeLineSpacing(.em(0.125))
+                    .markdownMargin(top: 24, bottom: 16)
+                    .markdownTextStyle { FontWeight(.semibold) }
+            }
+            .heading5 { configuration in
+                configuration.label
+                    .relativeLineSpacing(.em(0.125))
+                    .markdownMargin(top: 24, bottom: 16)
+                    .markdownTextStyle {
+                        FontWeight(.semibold)
+                        FontSize(.em(0.875))
+                    }
+            }
+            .heading6 { configuration in
+                configuration.label
+                    .relativeLineSpacing(.em(0.125))
+                    .markdownMargin(top: 24, bottom: 16)
+                    .markdownTextStyle {
+                        FontWeight(.semibold)
+                        FontSize(.em(0.85))
+                        ForegroundColor(tokens.tertiary)
+                    }
+            }
+            .paragraph { configuration in
+                configuration.label
+                    .fixedSize(horizontal: false, vertical: true)
+                    .relativeLineSpacing(.em(0.25))
+                    .markdownMargin(top: 0, bottom: 16)
+            }
+            .blockquote { configuration in
+                HStack(spacing: 0) {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(tokens.border)
+                        .relativeFrame(width: .em(0.2))
+                    configuration.label
+                        .markdownTextStyle { ForegroundColor(tokens.secondary) }
+                        .relativePadding(.horizontal, length: .em(1))
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .codeBlock { configuration in
+                ScrollView(.horizontal) {
+                    configuration.label
+                        .fixedSize(horizontal: false, vertical: true)
+                        .relativeLineSpacing(.em(0.225))
+                        .markdownTextStyle {
+                            FontFamilyVariant(.monospaced)
+                            FontSize(.em(0.85))
+                            ForegroundColor(tokens.foreground)
+                        }
+                        .padding(16)
+                }
+                .background(tokens.codeBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(tokens.border, lineWidth: 1)
+                )
+                .markdownMargin(top: 0, bottom: 16)
+            }
+            .listItem { configuration in
+                configuration.label.markdownMargin(top: .em(0.25))
+            }
+            .table { configuration in
+                configuration.label
+                    .fixedSize(horizontal: false, vertical: true)
+                    .markdownTableBorderStyle(.init(color: tokens.border))
+                    .markdownTableBackgroundStyle(
+                        .alternatingRows(
+                            tokens.documentBackground,
+                            tokens.tableStripeBackground,
+                            header: tokens.tableHeaderBackground
+                        )
+                    )
+                    .markdownMargin(top: 0, bottom: 16)
+            }
+            .tableCell { configuration in
+                configuration.label
+                    .markdownTextStyle {
+                        if configuration.row == 0 {
+                            FontWeight(.semibold)
+                        }
+                        BackgroundColor(nil)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 13)
+                    .relativeLineSpacing(.em(0.25))
+            }
+            .thematicBreak {
+                Divider()
+                    .relativeFrame(height: .em(0.25))
+                    .overlay(tokens.border)
+                    .markdownMargin(top: 24, bottom: 24)
+            }
     }
 }
 
@@ -85,6 +237,8 @@ private struct FrontMatterDocument {
 
 private struct YAMLFrontMatterView: View {
     let yaml: String
+    let fontSize: Double
+    let theme: MarkdownTheme
 
     private var entries: [YAMLEntry] {
         YAMLEntry.parse(yaml)
@@ -93,21 +247,22 @@ private struct YAMLFrontMatterView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("frontmatter.yml")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                Text("frontmatter")
+                    .font(.system(size: FrontMatterTypography.titleSize(for: fontSize), weight: .semibold, design: .monospaced))
+                    .foregroundStyle(theme.tokens.secondary)
                 Spacer()
                 Text("---")
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: FrontMatterTypography.delimiterSize(for: fontSize), design: .monospaced))
+                    .foregroundStyle(theme.tokens.tertiary)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
-            .background(Color(nsColor: .controlBackgroundColor))
+            .background(theme.tokens.frontMatterHeaderBackground)
 
             if entries.isEmpty {
                 Text(yaml)
-                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(theme.tokens.frontMatterText)
+                    .font(.system(size: FrontMatterTypography.codeSize(for: fontSize), design: .monospaced))
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(14)
@@ -116,10 +271,10 @@ private struct YAMLFrontMatterView: View {
                     ForEach(entries) { entry in
                         GridRow {
                             Text(entry.key)
-                                .font(.system(size: 13, weight: .medium, design: .monospaced))
-                                .foregroundStyle(.purple)
+                                .font(.system(size: FrontMatterTypography.valueSize(for: fontSize), weight: .medium, design: .monospaced))
+                                .foregroundStyle(theme.tokens.frontMatterKey)
                                 .textSelection(.enabled)
-                            YAMLValueView(value: entry.value)
+                            YAMLValueView(value: entry.value, fontSize: fontSize, theme: theme)
                         }
                     }
                 }
@@ -127,46 +282,49 @@ private struct YAMLFrontMatterView: View {
             }
 
             Text("---")
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(.tertiary)
+                .font(.system(size: FrontMatterTypography.valueSize(for: fontSize), design: .monospaced))
+                .foregroundStyle(theme.tokens.tertiary)
                 .padding(.horizontal, 14)
                 .padding(.bottom, 12)
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background(theme.tokens.frontMatterBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                .stroke(theme.tokens.border, lineWidth: 1)
         }
     }
 }
 
 private struct YAMLValueView: View {
     let value: YAMLValue
+    let fontSize: Double
+    let theme: MarkdownTheme
 
     var body: some View {
         switch value {
         case .empty:
             Text("empty")
-                .foregroundStyle(.tertiary)
-                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(theme.tokens.tertiary)
+                .font(.system(size: FrontMatterTypography.valueSize(for: fontSize), design: .monospaced))
         case .scalar(let text, let kind):
             Text(displayText(text, kind: kind))
                 .foregroundStyle(color(for: kind))
-                .font(.system(size: 13, design: .monospaced))
+                .font(.system(size: FrontMatterTypography.valueSize(for: fontSize), design: .monospaced))
                 .textSelection(.enabled)
         case .list(let values):
             Text("[\(values.map(quote).joined(separator: ", "))]")
-                .foregroundStyle(.teal)
-                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(theme.tokens.frontMatterString)
+                .font(.system(size: FrontMatterTypography.valueSize(for: fontSize), design: .monospaced))
                 .textSelection(.enabled)
         case .block(let text):
             Text(text)
-                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(theme.tokens.frontMatterText)
+                .font(.system(size: FrontMatterTypography.codeSize(for: fontSize), design: .monospaced))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(10)
-                .background(Color(nsColor: .controlBackgroundColor))
+                .background(theme.tokens.frontMatterBlockBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
         }
     }
@@ -194,13 +352,13 @@ private struct YAMLValueView: View {
     private func color(for kind: YAMLScalarKind) -> Color {
         switch kind {
         case .string:
-            return .teal
+            return theme.tokens.frontMatterString
         case .number, .date:
-            return .blue
+            return theme.tokens.frontMatterNumber
         case .boolean:
-            return .indigo
+            return theme.tokens.frontMatterBoolean
         case .null:
-            return .purple
+            return theme.tokens.frontMatterNull
         }
     }
 }
@@ -535,6 +693,7 @@ private enum YAMLScalarKind {
         | XSS | Better |
         """),
         fontSize: 16,
+        theme: .system,
         scrollPosition: RendererScrollPosition(),
         scrollApplyToken: UUID(),
         source: "preview"

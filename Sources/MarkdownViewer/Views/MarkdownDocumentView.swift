@@ -5,6 +5,8 @@ struct MarkdownDocumentView: View {
     @AppStorage("fontSize") private var fontSize: Double = 16
     @AppStorage("rendererMode") private var defaultRendererRaw: String = RendererMode.textual.rawValue
     @AppStorage("showRendererComparison") private var showRendererComparison = false
+    @AppStorage("textualColorSwatches") private var textualColorSwatches = false
+    @AppStorage("markdownTheme") private var markdownThemeRaw = MarkdownTheme.system.rawValue
     @SceneStorage("rendererModeLeft")  private var leftRaw:  String = ""
     @SceneStorage("rendererModeRight") private var rightRaw: String = ""
     @StateObject private var scrollPosition = RendererScrollPosition()
@@ -40,6 +42,12 @@ struct MarkdownDocumentView: View {
     }
     private var rightMode: RendererMode {
         RendererMode(rawValue: rightRaw) ?? .markdownUI
+    }
+    private var textualRendererIsVisible: Bool {
+        leftMode == .textual || (showRendererComparison && rightMode == .textual)
+    }
+    private var selectedTheme: MarkdownTheme {
+        MarkdownTheme(rawValue: markdownThemeRaw) ?? .system
     }
 
     private func setLeft(_ mode: RendererMode) {
@@ -93,7 +101,17 @@ struct MarkdownDocumentView: View {
             }
         }
         .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                if showRendererComparison {
+                    rendererMenu("Left", selection: leftBinding)
+                }
+            }
             ToolbarItemGroup {
+                if showRendererComparison {
+                    rendererMenu("Right", selection: rightBinding)
+                } else {
+                    rendererMenu("Renderer", selection: leftBinding)
+                }
                 Button(action: copyAll) {
                     Label("Copy All", systemImage: "doc.on.doc")
                 }
@@ -104,8 +122,10 @@ struct MarkdownDocumentView: View {
                 Button(action: increaseFontSize) {
                     Label("Increase font", systemImage: "textformat.size.larger")
                 }
+                themeMenu
             }
         }
+        .focusedSceneValue(\.textualRendererIsVisible, textualRendererIsVisible)
         .onChange(of: leftRaw)  { _, _ in scrollPosition.requestApply() }
         .onChange(of: rightRaw) { _, _ in scrollPosition.requestApply() }
         .onChange(of: fontSize) { _, _ in scrollPosition.requestApply() }
@@ -120,22 +140,6 @@ struct MarkdownDocumentView: View {
         source: String
     ) -> some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                if showRendererComparison {
-                    Text(label)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 12)
-                rendererMenu(label, selection: selection)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color(nsColor: .windowBackgroundColor))
-            .overlay(alignment: .bottom) {
-                Divider()
-            }
-
             renderer(mode, source: source)
         }
     }
@@ -163,6 +167,27 @@ struct MarkdownDocumentView: View {
         .help(showRendererComparison ? "\(label) panel renderer: \(selectedMode.title)" : "Renderer: \(selectedMode.title)")
     }
 
+    private var themeMenu: some View {
+        Menu {
+            ForEach(MarkdownTheme.allCases) { theme in
+                Button {
+                    markdownThemeRaw = theme.rawValue
+                    LogStore.shared.log("Theme → \(theme.title)", level: .debug, category: "ui")
+                } label: {
+                    if theme == selectedTheme {
+                        Label(theme.title, systemImage: "checkmark")
+                    } else {
+                        Text(theme.title)
+                    }
+                }
+            }
+        } label: {
+            Label(selectedTheme.title, systemImage: "paintpalette")
+                .labelStyle(.iconOnly)
+        }
+        .help("Document theme: \(selectedTheme.title)")
+    }
+
     @ViewBuilder
     private func renderer(_ mode: RendererMode, source: String) -> some View {
         switch mode {
@@ -170,6 +195,7 @@ struct MarkdownDocumentView: View {
             MarkdownWebView(
                 markdown: renderableText,
                 fontSize: fontSize,
+                theme: selectedTheme,
                 scrollPosition: scrollPosition,
                 scrollApplyToken: scrollPosition.applyToken,
                 source: source
@@ -178,6 +204,7 @@ struct MarkdownDocumentView: View {
             NativeMarkdownDocumentView(
                 document: document,
                 fontSize: fontSize,
+                theme: selectedTheme,
                 scrollPosition: scrollPosition,
                 scrollApplyToken: scrollPosition.applyToken,
                 source: source
@@ -186,6 +213,8 @@ struct MarkdownDocumentView: View {
             TextualMarkdownView(
                 markdown: renderableText,
                 fontSize: fontSize,
+                showsColorSwatches: textualColorSwatches,
+                theme: selectedTheme,
                 scrollPosition: scrollPosition,
                 scrollApplyToken: scrollPosition.applyToken,
                 source: source
@@ -194,6 +223,7 @@ struct MarkdownDocumentView: View {
             SwiftUIMarkdownView(
                 markdown: renderableText,
                 fontSize: fontSize,
+                theme: selectedTheme,
                 scrollPosition: scrollPosition,
                 scrollApplyToken: scrollPosition.applyToken,
                 source: source
@@ -230,6 +260,17 @@ struct MarkdownDocumentView: View {
             fontSize += 2
             LogStore.shared.log("Font size → \(Int(fontSize))pt", level: .debug, category: "ui")
         }
+    }
+}
+
+struct TextualRendererVisibleFocusedValueKey: FocusedValueKey {
+    typealias Value = Bool
+}
+
+extension FocusedValues {
+    var textualRendererIsVisible: Bool? {
+        get { self[TextualRendererVisibleFocusedValueKey.self] }
+        set { self[TextualRendererVisibleFocusedValueKey.self] = newValue }
     }
 }
 

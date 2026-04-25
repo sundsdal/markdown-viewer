@@ -109,10 +109,9 @@ private enum DefaultMarkdownOpenerPrompt {
         alert.addButton(withTitle: "Not Now")
         alert.addButton(withTitle: "Never Remind Me Again")
 
-        var isShowingAlert = true
         if let timeout {
             DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
-                guard isShowingAlert else {
+                guard alert.window.isVisible else {
                     return
                 }
 
@@ -122,7 +121,6 @@ private enum DefaultMarkdownOpenerPrompt {
         }
 
         let response = alert.runModal()
-        isShowingAlert = false
 
         if response == .alertThirdButtonReturn {
             UserDefaults.standard.set(true, forKey: neverRemindAgainKey)
@@ -226,11 +224,15 @@ private enum DefaultMarkdownOpener {
 
 private struct RendererCommands: Commands {
     @AppStorage("showRendererComparison") private var showRendererComparison = false
+    @AppStorage("textualColorSwatches") private var textualColorSwatches = false
+    @FocusedValue(\.textualRendererIsVisible) private var textualRendererIsVisible
 
     var body: some Commands {
         CommandGroup(after: .toolbar) {
             Toggle("Compare Renderers Side by Side", isOn: $showRendererComparison)
                 .keyboardShortcut("r", modifiers: [.command, .shift])
+            Toggle("Show Textual Color Swatches", isOn: $textualColorSwatches)
+                .disabled(textualRendererIsVisible != true)
         }
     }
 }

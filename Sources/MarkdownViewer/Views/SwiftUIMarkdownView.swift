@@ -14,6 +14,7 @@ import Markdown
 struct SwiftUIMarkdownView: View {
     let markdown: String
     let fontSize: Double
+    let theme: MarkdownTheme
     let scrollPosition: RendererScrollPosition
     let scrollApplyToken: UUID
     let source: String
@@ -25,11 +26,14 @@ struct SwiftUIMarkdownView: View {
             .background(
                 SwiftUIMarkdownBridge(
                     fontSize: fontSize,
+                    theme: theme,
                     scrollPosition: scrollPosition,
                     applyToken: scrollApplyToken,
                     source: source
                 )
             )
+            .background(theme.tokens.documentBackground)
+            .modifier(ThemeColorSchemeModifier(theme: theme))
             .onAppear { content = renderableMarkdown(markdown) }
             .onChange(of: markdown) { _, newValue in content = renderableMarkdown(newValue) }
     }
@@ -82,6 +86,7 @@ private struct FrontMatterDocument {
 
 private struct SwiftUIMarkdownBridge: NSViewRepresentable {
     let fontSize: Double
+    let theme: MarkdownTheme
     let scrollPosition: RendererScrollPosition
     let applyToken: UUID
     let source: String
@@ -99,6 +104,7 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
         context.coordinator.bridgeView = view
         context.coordinator.scheduleAttachAndApply(
             fontSize: fontSize,
+            theme: theme,
             applyToken: applyToken,
             attemptsRemaining: 30
         )
@@ -110,6 +116,7 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
         context.coordinator.source = source
         context.coordinator.scheduleAttachAndApply(
             fontSize: fontSize,
+            theme: theme,
             applyToken: applyToken,
             attemptsRemaining: 10
         )
@@ -126,6 +133,7 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
         private var scrollObserver: NSObjectProtocol?
         private var bridgeInstalled = false
         private var lastFontSize: Double?
+        private var lastTheme: MarkdownTheme?
         private var lastApplyToken: UUID?
         private var isApplyingScroll = false
 
@@ -142,17 +150,18 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
             webView?.configuration.userContentController.removeScriptMessageHandler(forName: handlerName)
         }
 
-        func scheduleAttachAndApply(fontSize: Double, applyToken: UUID, attemptsRemaining: Int) {
+        func scheduleAttachAndApply(fontSize: Double, theme: MarkdownTheme, applyToken: UUID, attemptsRemaining: Int) {
             DispatchQueue.main.async { [weak self] in
                 self?.tryAttachAndApply(
                     fontSize: fontSize,
+                    theme: theme,
                     applyToken: applyToken,
                     attemptsRemaining: attemptsRemaining
                 )
             }
         }
 
-        private func tryAttachAndApply(fontSize: Double, applyToken: UUID, attemptsRemaining: Int) {
+        private func tryAttachAndApply(fontSize: Double, theme: MarkdownTheme, applyToken: UUID, attemptsRemaining: Int) {
             if webView == nil, let bridgeView {
                 webView = findWebView(near: bridgeView)
             }
@@ -160,6 +169,7 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
                 attachScrollObserverIfNeeded(in: webView)
                 installBridgeIfNeeded(in: webView)
                 applyFontSizeIfNeeded(fontSize, in: webView)
+                applyThemeIfNeeded(theme, in: webView)
                 applyScrollIfNeeded(applyToken: applyToken, in: webView)
                 return
             }
@@ -167,6 +177,7 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
                 self?.tryAttachAndApply(
                     fontSize: fontSize,
+                    theme: theme,
                     applyToken: applyToken,
                     attemptsRemaining: attemptsRemaining - 1
                 )
@@ -266,9 +277,11 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
         private func applyFontSizeIfNeeded(_ fontSize: Double, in webView: WKWebView) {
             guard lastFontSize != fontSize else { return }
             lastFontSize = fontSize
+            let codeFontSize = FrontMatterTypography.codeSize(for: fontSize)
             let js = """
             (function() {
               var px = '\(fontSize)px';
+              var codePx = '\(codeFontSize)px';
               document.documentElement.style.fontSize = px;
               if (document.body) document.body.style.fontSize = px;
               var styleId = '__pane_font_size_override__';
@@ -281,7 +294,84 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
                 s.id = styleId;
                 (document.head || document.documentElement).appendChild(s);
               }
-              s.textContent = 'body { font-size: ' + px + '; }';
+              s.textContent = [
+                'body { font-size: ' + px + ' !important; }',
+                'pre, code { font-size: ' + codePx + ' !important; }',
+                'pre code { font-size: inherit !important; }'
+              ].join('\\n');
+            })();
+            """
+            evaluateRetrying(js, in: webView, attemptsRemaining: 20)
+        }
+
+        private func applyThemeIfNeeded(_ theme: MarkdownTheme, in webView: WKWebView) {
+            guard lastTheme != theme else { return }
+            lastTheme = theme
+            let css = """
+            \(theme.cssVariableRule)
+            html, body {
+              background: var(--md-bg) !important;
+              color: var(--md-fg) !important;
+            }
+            body, p, li, td, th, div, span, h1, h2, h3, h4, h5, h6 {
+              color: var(--md-fg) !important;
+            }
+            ul, ol {
+              color: var(--md-fg) !important;
+            }
+            a {
+              color: var(--md-link) !important;
+            }
+            code {
+              background: var(--md-inline-code-bg) !important;
+              color: var(--md-inline-code-fg) !important;
+            }
+            pre {
+              background: var(--md-code-bg) !important;
+              border-color: var(--md-border) !important;
+              color: var(--md-fg) !important;
+            }
+            pre code {
+              background: transparent !important;
+              color: inherit !important;
+            }
+            blockquote {
+              border-color: var(--md-border) !important;
+              color: var(--md-secondary) !important;
+            }
+            hr {
+              border-color: var(--md-border) !important;
+              background: var(--md-border) !important;
+            }
+            table {
+              border-color: var(--md-border) !important;
+            }
+            th, td {
+              border-color: var(--md-border) !important;
+            }
+            th {
+              background: var(--md-table-header-bg) !important;
+            }
+            tr:nth-child(even) td {
+              background: var(--md-table-stripe-bg) !important;
+            }
+            """
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "'", with: "\\'")
+                .replacingOccurrences(of: "\n", with: "\\n")
+            let js = """
+            (function() {
+              var styleId = '__pane_theme_override__';
+              var existing = document.getElementById(styleId);
+              var s;
+              if (existing) {
+                s = existing;
+              } else {
+                s = document.createElement('style');
+                s.id = styleId;
+                (document.head || document.documentElement).appendChild(s);
+              }
+              s.textContent = '\(css)';
             })();
             """
             evaluateRetrying(js, in: webView, attemptsRemaining: 20)

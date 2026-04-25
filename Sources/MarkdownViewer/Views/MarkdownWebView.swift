@@ -4,6 +4,7 @@ import WebKit
 struct MarkdownWebView: NSViewRepresentable {
     let markdown: String
     let fontSize: Double
+    let theme: MarkdownTheme
     let scrollPosition: RendererScrollPosition
     let scrollApplyToken: UUID
     let source: String
@@ -24,12 +25,17 @@ struct MarkdownWebView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.scrollPosition = scrollPosition
         context.coordinator.source = source
-        let html = buildFullHTML(markdown: markdown, fontSize: fontSize)
+        let signature = documentSignature(markdown: markdown, fontSize: fontSize)
 
-        if context.coordinator.loadedHTML != html {
-            context.coordinator.loadedHTML = html
-            webView.loadHTMLString(html, baseURL: nil)
-        } else if context.coordinator.lastApplyToken != scrollApplyToken {
+        if context.coordinator.loadedDocumentSignature != signature {
+            context.coordinator.loadedDocumentSignature = signature
+            context.coordinator.lastTheme = theme
+            webView.loadHTMLString(buildFullHTML(markdown: markdown, fontSize: fontSize, theme: theme), baseURL: nil)
+        } else {
+            context.coordinator.applyThemeIfNeeded(theme)
+        }
+
+        if context.coordinator.lastApplyToken != scrollApplyToken {
             context.coordinator.lastApplyToken = scrollApplyToken
             context.coordinator.applyScrollPositionIfNeeded()
         }
@@ -43,8 +49,9 @@ struct MarkdownWebView: NSViewRepresentable {
         weak var webView: WKWebView?
         var scrollPosition: RendererScrollPosition
         var source: String
-        var loadedHTML: String?
+        var loadedDocumentSignature: String?
         var lastApplyToken: UUID?
+        var lastTheme: MarkdownTheme?
         private var isApplyingScroll = false
 
         init(scrollPosition: RendererScrollPosition, source: String) {
@@ -83,18 +90,42 @@ struct MarkdownWebView: NSViewRepresentable {
                 }
             }
         }
+
+        func applyThemeIfNeeded(_ theme: MarkdownTheme) {
+            guard lastTheme != theme else { return }
+            lastTheme = theme
+            guard let webView else { return }
+            let script = """
+            (() => {
+              const id = '__markdown_theme_variables__';
+              let style = document.getElementById(id);
+              if (!style) {
+                style = document.createElement('style');
+                style.id = id;
+                (document.head || document.documentElement).prepend(style);
+              }
+              style.textContent = '\(theme.escapedCSSVariableRuleForJavaScript)';
+            })();
+            """
+            webView.evaluateJavaScript(script)
+        }
     }
 
     private func loadHTML(in webView: WKWebView, context: Context) {
-        let html = buildFullHTML(markdown: markdown, fontSize: fontSize)
-        context.coordinator.loadedHTML = html
+        let html = buildFullHTML(markdown: markdown, fontSize: fontSize, theme: theme)
+        context.coordinator.loadedDocumentSignature = documentSignature(markdown: markdown, fontSize: fontSize)
         context.coordinator.lastApplyToken = scrollApplyToken
+        context.coordinator.lastTheme = theme
         webView.loadHTMLString(html, baseURL: nil)
+    }
+
+    private func documentSignature(markdown: String, fontSize: Double) -> String {
+        "\(fontSize)\u{0}\(markdown)"
     }
 
     // MARK: - Full HTML document
 
-    private func buildFullHTML(markdown: String, fontSize: Double) -> String {
+    private func buildFullHTML(markdown: String, fontSize: Double, theme: MarkdownTheme) -> String {
         let body = renderMarkdownDocument(markdown)
         return """
         <!DOCTYPE html>
@@ -127,13 +158,16 @@ struct MarkdownWebView: NSViewRepresentable {
                 window.addEventListener("load", reportScrollPosition);
             })();
         </script>
+        <style id="__markdown_theme_variables__">
+        \(theme.cssVariableRule)
+        </style>
         <style>
-            :root { color-scheme: light dark; }
             body {
                 font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
                 font-size: \(fontSize)px;
                 line-height: 1.65;
-                color: light-dark(#1d1d1f, #e0e0e0);
+                color: var(--md-fg);
+                background: var(--md-bg);
                 max-width: 720px;
                 margin: 0 auto;
                 padding: 40px;
@@ -144,18 +178,18 @@ struct MarkdownWebView: NSViewRepresentable {
             h3 { font-size: \(fontSize * 1.25)px; font-weight: 600; margin: 0.7em 0 0.3em; }
             h4 { font-size: \(fontSize * 1.1)px; font-weight: 600; margin: 0.6em 0 0.2em; }
             p { margin: 0.6em 0; }
-            a { color: light-dark(#0066cc, #6cb4ee); }
+            a { color: var(--md-link); }
             code {
                 font-family: Menlo, Monaco, "SF Mono", monospace;
                 font-size: 0.875em;
-                background: light-dark(#f5f5f7, #2a2a2e);
-                color: light-dark(#c7254e, #f0c674);
+                background: var(--md-inline-code-bg);
+                color: var(--md-inline-code-fg);
                 padding: 2px 5px;
                 border-radius: 3px;
             }
             pre {
-                background: light-dark(#f0f0f3, #1e1e22);
-                border: 1px solid light-dark(#ddd, #444);
+                background: var(--md-code-bg);
+                border: 1px solid var(--md-border);
                 border-radius: 6px;
                 padding: 12px 16px;
                 overflow-x: auto;
@@ -167,10 +201,10 @@ struct MarkdownWebView: NSViewRepresentable {
                 padding: 0;
             }
             blockquote {
-                border-left: 3px solid light-dark(#ddd, #444);
+                border-left: 3px solid var(--md-border);
                 margin: 0.6em 0;
                 padding: 0.2em 0 0.2em 16px;
-                color: light-dark(#666, #aaa);
+                color: var(--md-secondary);
             }
             table {
                 border-collapse: collapse;
@@ -180,31 +214,31 @@ struct MarkdownWebView: NSViewRepresentable {
                 display: block;
             }
             th, td {
-                border: 1px solid light-dark(#ddd, #444);
+                border: 1px solid var(--md-border);
                 padding: 8px 14px;
                 text-align: left;
             }
             th {
                 font-weight: 600;
-                background: light-dark(#f5f5f7, #2a2a2e);
+                background: var(--md-table-header-bg);
             }
             tr:nth-child(even) td {
-                background: light-dark(#fafafa, #232326);
+                background: var(--md-table-stripe-bg);
             }
             ul, ol { padding-left: 1.5em; margin: 0.4em 0; }
             li { margin: 0.2em 0; }
-            hr { border: none; border-top: 1px solid light-dark(#ddd, #444); margin: 1.2em 0; }
+            hr { border: none; border-top: 1px solid var(--md-border); margin: 1.2em 0; }
             img { max-width: 100%; border-radius: 4px; }
             .frontmatter {
                 margin: 0 0 36px;
                 padding: 0;
-                border: 1px solid light-dark(#d7dce3, #343a46);
+                border: 1px solid var(--md-frontmatter-border);
                 border-radius: 8px;
                 background:
-                    linear-gradient(90deg, light-dark(#eef2f7, #171b22) 0 42px, transparent 42px),
-                    light-dark(#f8fafc, #12151b);
-                color: light-dark(#1f2937, #d8dee9);
-                box-shadow: inset 0 1px 0 light-dark(#ffffff, #242a35);
+                    linear-gradient(90deg, var(--md-frontmatter-gutter) 0 42px, transparent 42px),
+                    var(--md-frontmatter-bg);
+                color: var(--md-frontmatter-value);
+                box-shadow: inset 0 1px 0 var(--md-frontmatter-shadow);
                 overflow: hidden;
             }
             .frontmatter-header {
@@ -214,20 +248,20 @@ struct MarkdownWebView: NSViewRepresentable {
                 gap: 14px;
                 min-height: 34px;
                 padding: 0 13px 0 54px;
-                border-bottom: 1px solid light-dark(#dfe4eb, #2d333f);
-                background: light-dark(#f1f5f9, #191e27);
+                border-bottom: 1px solid var(--md-frontmatter-block-border);
+                background: var(--md-frontmatter-header-bg);
             }
             .frontmatter-title {
                 font-family: Menlo, Monaco, "SF Mono", monospace;
                 font-size: 0.72em;
                 font-weight: 650;
                 letter-spacing: 0;
-                color: light-dark(#475569, #a6adbb);
+                color: var(--md-frontmatter-title);
             }
             .frontmatter-delimiter {
                 font-family: Menlo, Monaco, "SF Mono", monospace;
                 font-size: 0.76em;
-                color: light-dark(#94a3b8, #687080);
+                color: var(--md-frontmatter-delimiter);
             }
             .frontmatter-grid {
                 display: grid;
@@ -255,22 +289,22 @@ struct MarkdownWebView: NSViewRepresentable {
                 font-size: 0.9em;
                 line-height: 1.7;
                 background: transparent;
-                color: light-dark(#334155, #d8dee9);
+                color: var(--md-frontmatter-code-fg);
                 padding: 0;
             }
             .frontmatter-key {
                 margin: 0;
-                color: light-dark(#0f5f8c, #8ccdf2);
+                color: var(--md-frontmatter-key);
                 overflow-wrap: anywhere;
             }
             .frontmatter-key::after {
                 content: ":";
-                color: light-dark(#64748b, #7b8494);
+                color: var(--md-frontmatter-punctuation);
             }
             .frontmatter-value {
                 margin: 0;
                 min-width: 0;
-                color: light-dark(#334155, #d8dee9);
+                color: var(--md-frontmatter-value);
             }
             .frontmatter-scalar,
             .frontmatter-string,
@@ -279,22 +313,22 @@ struct MarkdownWebView: NSViewRepresentable {
                 overflow-wrap: anywhere;
             }
             .frontmatter-string {
-                color: light-dark(#0f766e, #ce9178);
+                color: var(--md-frontmatter-string);
             }
             .frontmatter-date,
             .frontmatter-number {
                 font-variant-numeric: tabular-nums;
-                color: light-dark(#0369a1, #b5cea8);
+                color: var(--md-frontmatter-number);
             }
             .frontmatter-boolean {
                 font-variant-numeric: tabular-nums;
-                color: light-dark(#2563eb, #569cd6);
+                color: var(--md-frontmatter-boolean);
             }
             .frontmatter-null {
-                color: light-dark(#9333ea, #c586c0);
+                color: var(--md-frontmatter-null);
             }
             .frontmatter-punctuation {
-                color: light-dark(#64748b, #7b8494);
+                color: var(--md-frontmatter-punctuation);
             }
             .frontmatter-array {
                 overflow-wrap: anywhere;
@@ -303,8 +337,8 @@ struct MarkdownWebView: NSViewRepresentable {
                 margin: 3px 0 5px;
                 padding: 9px 11px;
                 border-radius: 6px;
-                border: 1px solid light-dark(#dfe4eb, #303744);
-                background: light-dark(#ffffff, #0f1218);
+                border: 1px solid var(--md-frontmatter-block-border);
+                background: var(--md-frontmatter-block-bg);
                 white-space: pre-wrap;
             }
             .frontmatter-block code {
@@ -316,15 +350,15 @@ struct MarkdownWebView: NSViewRepresentable {
                 font-family: Menlo, Monaco, "SF Mono", monospace;
                 font-size: 0.86em;
                 line-height: 1;
-                color: light-dark(#94a3b8, #687080);
+                color: var(--md-frontmatter-delimiter);
             }
-            .sy-comment { color: light-dark(#6a737d, #6a9955); font-style: italic; }
-            .sy-key { color: light-dark(#0f5f8c, #8ccdf2); }
-            .sy-string { color: light-dark(#032f62, #ce9178); }
-            .sy-number { color: light-dark(#005cc5, #b5cea8); }
-            .sy-keyword { color: light-dark(#d73a49, #c586c0); }
-            .sy-boolean { color: light-dark(#005cc5, #569cd6); }
-            .sy-punctuation { color: light-dark(#6a737d, #808080); }
+            .sy-comment { color: var(--md-syntax-comment); font-style: italic; }
+            .sy-key { color: var(--md-syntax-key); }
+            .sy-string { color: var(--md-syntax-string); }
+            .sy-number { color: var(--md-syntax-number); }
+            .sy-keyword { color: var(--md-syntax-keyword); }
+            .sy-boolean { color: var(--md-syntax-boolean); }
+            .sy-punctuation { color: var(--md-syntax-punctuation); }
         </style>
         </head>
         <body>
@@ -396,7 +430,7 @@ struct MarkdownWebView: NSViewRepresentable {
         return """
         <section class="frontmatter" aria-label="Frontmatter">
         <div class="frontmatter-header">
-        <span class="frontmatter-title">frontmatter.yml</span>
+        <span class="frontmatter-title">frontmatter</span>
         <span class="frontmatter-delimiter">---</span>
         </div>
         <pre class="frontmatter-code"><code>\(highlightCode(yaml, language: "yaml"))</code></pre>
