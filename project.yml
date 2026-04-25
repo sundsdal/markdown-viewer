@@ -55,6 +55,7 @@ targets:
             CFBundleTypeRole: Viewer
             LSItemContentTypes:
               - net.daringfireball.markdown
+              - public.markdown
               - public.plain-text
           - CFBundleTypeName: JSON Document
             CFBundleTypeRole: Viewer

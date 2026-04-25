@@ -156,22 +156,41 @@ private enum DefaultMarkdownOpener {
         "net.daringfireball.markdown",
         "public.markdown"
     ]
+    private static let rolesToSet: [LSRolesMask] = [.all, .viewer, .editor]
+    private static let rolesToCheck: [LSRolesMask] = [.all, .viewer, .editor]
 
     static func isDefaultOpenerForMarkdownFiles() -> Bool {
-        guard
-            let bundleIdentifier = Bundle.main.bundleIdentifier,
-            let defaultApplicationURL = NSWorkspace.shared.urlForApplication(toOpen: DefaultMarkdownOpenerPrompt.sampleMarkdownURL),
-            let defaultBundleIdentifier = Bundle(url: defaultApplicationURL)?.bundleIdentifier
-        else {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
             return false
         }
 
-        return defaultBundleIdentifier == bundleIdentifier
+        if let defaultApplicationURL = NSWorkspace.shared.urlForApplication(toOpen: DefaultMarkdownOpenerPrompt.sampleMarkdownURL),
+           Bundle(url: defaultApplicationURL)?.bundleIdentifier == bundleIdentifier {
+            return true
+        }
+
+        return allMarkdownContentTypeIdentifiers().contains { contentTypeIdentifier in
+            rolesToCheck.contains { role in
+                guard let defaultHandler = LSCopyDefaultRoleHandlerForContentType(
+                    contentTypeIdentifier as CFString,
+                    role
+                )?.takeRetainedValue() as String? else {
+                    return false
+                }
+
+                return defaultHandler == bundleIdentifier
+            }
+        }
     }
 
     static func makeDefaultOpenerForMarkdownFiles() -> OSStatus {
         guard let bundleIdentifier = Bundle.main.bundleIdentifier else {
             return OSStatus(coreFoundationUnknownErr)
+        }
+
+        let registrationStatus = LSRegisterURL(Bundle.main.bundleURL as CFURL, true)
+        guard registrationStatus == noErr else {
+            return registrationStatus
         }
 
         let contentTypeIdentifiers = allMarkdownContentTypeIdentifiers()
@@ -180,11 +199,17 @@ private enum DefaultMarkdownOpener {
                 return currentStatus
             }
 
-            return LSSetDefaultRoleHandlerForContentType(
-                contentTypeIdentifier as CFString,
-                .viewer,
-                bundleIdentifier as CFString
-            )
+            return rolesToSet.reduce(noErr) { roleStatus, role in
+                guard roleStatus == noErr else {
+                    return roleStatus
+                }
+
+                return LSSetDefaultRoleHandlerForContentType(
+                    contentTypeIdentifier as CFString,
+                    role,
+                    bundleIdentifier as CFString
+                )
+            }
         }
     }
 
