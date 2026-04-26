@@ -6,6 +6,7 @@ struct MarkdownDocumentView: View {
     @AppStorage("rendererMode") private var defaultRendererRaw: String = RendererMode.textual.rawValue
     @AppStorage("showRendererComparison") private var showRendererComparison = false
     @AppStorage("textualColorSwatches") private var textualColorSwatches = false
+    @AppStorage("textualInferLanguage") private var textualInfersLanguageHints = false
     @AppStorage("markdownTheme") private var markdownThemeRaw = MarkdownTheme.system.rawValue
     @SceneStorage("rendererModeLeft")  private var leftRaw:  String = ""
     @SceneStorage("rendererModeRight") private var rightRaw: String = ""
@@ -216,6 +217,7 @@ struct MarkdownDocumentView: View {
                 markdown: renderableText,
                 fontSize: fontSize,
                 showsColorSwatches: textualColorSwatches,
+                infersLanguageHints: textualInfersLanguageHints,
                 theme: selectedTheme,
                 scrollPosition: scrollPosition,
                 scrollApplyToken: scrollPosition.applyToken,

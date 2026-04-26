@@ -5,6 +5,7 @@ struct TextualMarkdownView: View {
     let markdown: String
     let fontSize: Double
     let showsColorSwatches: Bool
+    let infersLanguageHints: Bool
     let theme: MarkdownTheme
     let scrollPosition: RendererScrollPosition
     let scrollApplyToken: UUID
@@ -73,11 +74,11 @@ struct TextualMarkdownView: View {
 
     @ViewBuilder
     private func structuredText(_ text: String) -> some View {
-        if showsColorSwatches {
-            StructuredText(text, parser: TextualCachingMarkdownParser(mode: .colorSwatches))
-        } else {
-            StructuredText(text, parser: TextualCachingMarkdownParser(mode: .markdown))
-        }
+        let mode: TextualCachingMarkdownParser.Mode = showsColorSwatches ? .colorSwatches : .markdown
+        StructuredText(
+            text,
+            parser: TextualCachingMarkdownParser(mode: mode, infersLanguageHints: infersLanguageHints)
+        )
     }
 }
 
@@ -88,12 +89,19 @@ private struct TextualCachingMarkdownParser: MarkupParser {
     }
 
     let mode: Mode
+    let infersLanguageHints: Bool
 
     func attributedString(for input: String) throws -> AttributedString {
-        try TextualAttributedStringCache.shared.attributedString(for: input, mode: mode) {
-            let attributedString = TextualCodeBlockLanguageHints.limitingExpensiveHighlightHints(
-                in: try AttributedStringMarkdownParser.markdown().attributedString(for: input)
-            )
+        try TextualAttributedStringCache.shared.attributedString(
+            for: input,
+            mode: mode,
+            infersLanguageHints: infersLanguageHints
+        ) {
+            var attributedString = try AttributedStringMarkdownParser.markdown().attributedString(for: input)
+            if infersLanguageHints {
+                attributedString = TextualCodeBlockLanguageHints.inferringMissingLanguageHints(in: attributedString)
+            }
+            attributedString = TextualCodeBlockLanguageHints.limitingExpensiveHighlightHints(in: attributedString)
             switch mode {
             case .markdown:
                 return attributedString
@@ -126,9 +134,96 @@ private enum TextualCodeBlockLanguageHints {
 
         return output
     }
+
+    static func inferringMissingLanguageHints(in attributedString: AttributedString) -> AttributedString {
+        var output = attributedString
+        let replacements: [(Range<AttributedString.Index>, PresentationIntent)] = attributedString.runs.compactMap { run in
+            guard let intent = run.presentationIntent,
+                  intent.hasMissingCodeBlockLanguageHint else {
+                return nil
+            }
+            let body = String(attributedString[run.range].characters)
+            guard let inferred = TextualLanguageInference.inferredLanguage(for: body),
+                  let replacement = intent.settingCodeBlockLanguageHint(inferred) else {
+                return nil
+            }
+            return (run.range, replacement)
+        }
+
+        for (range, replacement) in replacements {
+            output[range].presentationIntent = replacement
+        }
+
+        return output
+    }
+}
+
+private enum TextualLanguageInference {
+    private static let shellCommandTokens: Set<String> = [
+        "apt", "apt-get", "awk", "bash", "bind_ro", "bind_rw", "brew",
+        "bunx", "cat", "cd", "chgrp", "chmod", "chown", "cp", "curl",
+        "df", "docker", "du", "echo", "env", "export", "find", "grep",
+        "gunzip", "gzip", "head", "kill", "killall", "ln", "ls", "lsof",
+        "make", "mkdir", "mount", "mv", "nc", "netstat", "npm", "npx",
+        "open", "pgrep", "ping", "pkill", "ps", "pwd", "rm", "rmdir",
+        "rsync", "scp", "sed", "service", "sh", "ssh", "stat", "sudo",
+        "systemctl", "tail", "tar", "tee", "touch", "tr", "umount",
+        "uname", "unset", "unshare", "uv", "wc", "wget", "which", "who",
+        "xargs", "yarn", "zsh",
+    ]
+
+    static func inferredLanguage(for body: String) -> String? {
+        let lines = body.split(separator: "\n", omittingEmptySubsequences: false)
+        guard !lines.isEmpty else {
+            return nil
+        }
+
+        if let shebangLanguage = languageFromShebang(in: lines.first ?? "") {
+            return shebangLanguage
+        }
+
+        var shellSignals = 0
+        for line in lines {
+            let trimmed = line.drop { $0 == " " || $0 == "\t" }
+            if trimmed.hasPrefix("$ ") || trimmed.hasPrefix("# ") {
+                shellSignals += 1
+            } else if let firstToken = trimmed.split(maxSplits: 1, whereSeparator: { $0 == " " || $0 == "\t" }).first,
+                      shellCommandTokens.contains(String(firstToken)) {
+                shellSignals += 1
+            }
+            if shellSignals >= 2 {
+                return "bash"
+            }
+        }
+
+        return nil
+    }
+
+    private static func languageFromShebang(in line: Substring) -> String? {
+        guard line.hasPrefix("#!") else {
+            return nil
+        }
+        let lower = line.lowercased()
+        if lower.contains("python") { return "python" }
+        if lower.contains("node") { return "javascript" }
+        if lower.contains("ruby") { return "ruby" }
+        if lower.contains("perl") { return "perl" }
+        if lower.contains("lua") { return "lua" }
+        if lower.contains("zsh") || lower.contains("bash") || lower.contains("/sh") {
+            return "bash"
+        }
+        return nil
+    }
 }
 
 private extension PresentationIntent {
+    // Prism grammars cheap enough to keep highlighting even on very large blocks.
+    // The default cap drops the language hint so heavy state-machine grammars (swift, ts, …)
+    // don't block the main thread; "math" is an in-app special case rendered separately.
+    private static let cheapHighlightLanguages: Set<String> = [
+        "json", "yaml", "yml", "toml", "ini", "csv", "tsv", "plaintext", "text", "math",
+    ]
+
     var removingExpensiveCodeBlockLanguageHints: PresentationIntent? {
         var rebuilt: PresentationIntent?
         var changed = false
@@ -136,9 +231,38 @@ private extension PresentationIntent {
         for component in components.reversed() {
             let kind: PresentationIntent.Kind
             switch component.kind {
-            case .codeBlock(let languageHint) where languageHint?.lowercased() != "math":
+            case .codeBlock(let languageHint)
+                where !Self.cheapHighlightLanguages.contains(languageHint?.lowercased() ?? ""):
                 kind = .codeBlock(languageHint: nil)
                 changed = changed || languageHint != nil
+            default:
+                kind = component.kind
+            }
+            rebuilt = PresentationIntent(kind, identity: component.identity, parent: rebuilt)
+        }
+
+        return changed ? rebuilt : nil
+    }
+
+    var hasMissingCodeBlockLanguageHint: Bool {
+        components.contains { component in
+            if case .codeBlock(let languageHint) = component.kind {
+                return languageHint?.isEmpty ?? true
+            }
+            return false
+        }
+    }
+
+    func settingCodeBlockLanguageHint(_ languageHint: String) -> PresentationIntent? {
+        var rebuilt: PresentationIntent?
+        var changed = false
+
+        for component in components.reversed() {
+            let kind: PresentationIntent.Kind
+            switch component.kind {
+            case .codeBlock(let existing) where (existing?.isEmpty ?? true):
+                kind = .codeBlock(languageHint: languageHint)
+                changed = true
             default:
                 kind = component.kind
             }
@@ -156,6 +280,7 @@ private final class TextualAttributedStringCache {
     private struct Key: Hashable {
         let input: String
         let mode: TextualCachingMarkdownParser.Mode
+        let infersLanguageHints: Bool
     }
 
     private let limit = 12
@@ -165,9 +290,10 @@ private final class TextualAttributedStringCache {
     func attributedString(
         for input: String,
         mode: TextualCachingMarkdownParser.Mode,
+        infersLanguageHints: Bool,
         build: () throws -> AttributedString
     ) throws -> AttributedString {
-        let key = Key(input: input, mode: mode)
+        let key = Key(input: input, mode: mode, infersLanguageHints: infersLanguageHints)
         if let cached = values[key] {
             markRecentlyUsed(key)
             return cached
@@ -636,7 +762,10 @@ private struct TextualFrontMatterView: View {
             .padding(.vertical, 9)
             .background(theme.tokens.frontMatterHeaderBackground)
 
-            StructuredText(yamlCodeBlock, parser: TextualCachingMarkdownParser(mode: .markdown))
+            StructuredText(
+                yamlCodeBlock,
+                parser: TextualCachingMarkdownParser(mode: .markdown, infersLanguageHints: false)
+            )
                 .font(.system(size: FrontMatterTypography.codeSize(for: fontSize), design: .monospaced))
                 .foregroundStyle(theme.tokens.frontMatterText)
                 .textual.codeBlockStyle(TextualFrontMatterCodeBlockStyle(fontSize: fontSize, theme: theme))

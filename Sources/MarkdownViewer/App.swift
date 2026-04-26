@@ -225,6 +225,7 @@ private enum DefaultMarkdownOpener {
 private struct RendererCommands: Commands {
     @AppStorage("showRendererComparison") private var showRendererComparison = false
     @AppStorage("textualColorSwatches") private var textualColorSwatches = false
+    @AppStorage("textualInferLanguage") private var textualInfersLanguageHints = false
     @FocusedValue(\.textualRendererIsVisible) private var textualRendererIsVisible
 
     var body: some Commands {
@@ -232,6 +233,8 @@ private struct RendererCommands: Commands {
             Toggle("Compare Renderers Side by Side", isOn: $showRendererComparison)
                 .keyboardShortcut("r", modifiers: [.command, .shift])
             Toggle("Show Textual Color Swatches", isOn: $textualColorSwatches)
+                .disabled(textualRendererIsVisible != true)
+            Toggle("Infer Code Block Language", isOn: $textualInfersLanguageHints)
                 .disabled(textualRendererIsVisible != true)
         }
     }

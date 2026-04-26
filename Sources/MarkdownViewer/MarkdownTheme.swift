@@ -139,8 +139,8 @@ enum MarkdownTheme: String, CaseIterable, Identifiable {
                     "blockBackground": "#ffffff", "blockBorder": "#dfe4eb", "shadow": "#ffffff"
                 ],
                 syntax: [
-                    "comment": "#6a737d", "key": "#0f5f8c", "string": "#032f62", "number": "#005cc5",
-                    "keyword": "#d73a49", "boolean": "#005cc5", "punctuation": "#6a737d"
+                    "comment": "#6a737d", "key": "#cf222e", "string": "#1a7f37", "number": "#bc4c00",
+                    "keyword": "#8250df", "boolean": "#bc4c00", "punctuation": "#57606a"
                 ]
             )
         case .dark:
@@ -158,8 +158,8 @@ enum MarkdownTheme: String, CaseIterable, Identifiable {
                     "blockBackground": "#0f1218", "blockBorder": "#303744", "shadow": "#242a35"
                 ],
                 syntax: [
-                    "comment": "#6a9955", "key": "#8ccdf2", "string": "#ce9178", "number": "#b5cea8",
-                    "keyword": "#c586c0", "boolean": "#569cd6", "punctuation": "#808080"
+                    "comment": "#7eaa6a", "key": "#9cdcfe", "string": "#ce9178", "number": "#b5cea8",
+                    "keyword": "#c586c0", "boolean": "#569cd6", "punctuation": "#c8c8c8"
                 ]
             )
         case .sepia:
@@ -177,8 +177,8 @@ enum MarkdownTheme: String, CaseIterable, Identifiable {
                     "blockBackground": "#fff8ed", "blockBorder": "#d8c5aa", "shadow": "#fffaf2"
                 ],
                 syntax: [
-                    "comment": "#8b806f", "key": "#7f4a18", "string": "#517447", "number": "#25626d",
-                    "keyword": "#9a3f52", "boolean": "#5a5f9e", "punctuation": "#8d7a62"
+                    "comment": "#8b806f", "key": "#7f4a18", "string": "#517447", "number": "#b06825",
+                    "keyword": "#9a3f52", "boolean": "#b06825", "punctuation": "#8d7a62"
                 ]
             )
         case .highContrast:
@@ -327,12 +327,12 @@ struct MarkdownThemeTokens {
             frontMatterPunctuation = Color(nsColor: .secondaryLabelColor)
             frontMatterBlockBackground = Color(nsColor: .textBackgroundColor)
             syntaxComment = Color(red: 0.42, green: 0.45, blue: 0.49)
-            syntaxKeyword = Color(red: 0.84, green: 0.23, blue: 0.29)
-            syntaxString = Color(red: 0.01, green: 0.18, blue: 0.38)
-            syntaxNumber = Color(red: 0.00, green: 0.36, blue: 0.77)
-            syntaxBoolean = Color(red: 0.00, green: 0.36, blue: 0.77)
+            syntaxKeyword = Color(red: 0.51, green: 0.31, blue: 0.87)
+            syntaxString = Color(red: 0.10, green: 0.50, blue: 0.21)
+            syntaxNumber = Color(red: 0.74, green: 0.30, blue: 0.00)
+            syntaxBoolean = Color(red: 0.74, green: 0.30, blue: 0.00)
             syntaxPunctuation = Color(nsColor: .secondaryLabelColor)
-            syntaxKey = Color(red: 0.06, green: 0.37, blue: 0.55)
+            syntaxKey = Color(red: 0.81, green: 0.13, blue: 0.18)
         } else {
             documentBackground = Color(cssColor: content.background)
             foreground = Color(cssColor: content.foreground)
