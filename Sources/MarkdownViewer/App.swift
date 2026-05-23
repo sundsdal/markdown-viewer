@@ -21,11 +21,12 @@ struct MarkdownViewerApp: App {
 
     var body: some Scene {
         DocumentGroup(viewing: MarkdownDocument.self) { file in
-            MarkdownDocumentView(document: file.document)
+            MarkdownDocumentView(document: file.document, fileURL: file.fileURL)
         }
         .defaultSize(width: 860, height: 700)
         .commands {
             RendererCommands()
+            SearchCommands()
             DebugCommands()
             DefaultMarkdownOpenerCommands()
         }
@@ -219,6 +220,32 @@ private enum DefaultMarkdownOpener {
             identifiers.append(filenameContentType)
         }
         return identifiers
+    }
+}
+
+private struct SearchCommands: Commands {
+    @FocusedValue(\.documentSearchActions) private var documentSearchActions
+
+    var body: some Commands {
+        CommandMenu("Find") {
+            Button("Find...") {
+                documentSearchActions?.show()
+            }
+            .keyboardShortcut("f", modifiers: [.command])
+            .disabled(documentSearchActions == nil)
+
+            Button("Find Next") {
+                documentSearchActions?.next()
+            }
+            .keyboardShortcut("g", modifiers: [.command])
+            .disabled(documentSearchActions == nil)
+
+            Button("Find Previous") {
+                documentSearchActions?.previous()
+            }
+            .keyboardShortcut("g", modifiers: [.command, .shift])
+            .disabled(documentSearchActions == nil)
+        }
     }
 }
 

@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct MarkdownDocumentView: View {
-    let document: MarkdownDocument
     @AppStorage("fontSize") private var fontSize: Double = 16
     @AppStorage("rendererMode") private var defaultRendererRaw: String = RendererMode.textual.rawValue
     @AppStorage("showRendererComparison") private var showRendererComparison = false
@@ -10,7 +9,19 @@ struct MarkdownDocumentView: View {
     @AppStorage("markdownTheme") private var markdownThemeRaw = MarkdownTheme.system.rawValue
     @SceneStorage("rendererModeLeft")  private var leftRaw:  String = ""
     @SceneStorage("rendererModeRight") private var rightRaw: String = ""
+    @StateObject private var autoReloadingDocument: AutoReloadingMarkdownDocument
     @StateObject private var scrollPosition = RendererScrollPosition()
+    @State private var isShowingSearch = false
+    @State private var searchQuery = ""
+    @State private var searchIsCaseSensitive = false
+    @State private var selectedSearchHitIndex = 0
+    @FocusState private var searchFieldIsFocused: Bool
+
+    init(document: MarkdownDocument, fileURL: URL? = nil) {
+        _autoReloadingDocument = StateObject(
+            wrappedValue: AutoReloadingMarkdownDocument(document: document, fileURL: fileURL)
+        )
+    }
 
     private enum RendererMode: String, CaseIterable, Identifiable {
         case html             = "html"
@@ -49,6 +60,29 @@ struct MarkdownDocumentView: View {
     }
     private var selectedTheme: MarkdownTheme {
         MarkdownTheme(rawValue: markdownThemeRaw) ?? .system
+    }
+    private var document: MarkdownDocument {
+        autoReloadingDocument.document
+    }
+    private var searchHits: [DocumentSearchHit] {
+        DocumentSearchHit.matches(
+            query: searchQuery,
+            in: document.text,
+            isCaseSensitive: searchIsCaseSensitive
+        )
+    }
+    private var selectedSearchHit: DocumentSearchHit? {
+        guard !searchHits.isEmpty else {
+            return nil
+        }
+        return searchHits[min(max(selectedSearchHitIndex, 0), searchHits.count - 1)]
+    }
+    private var documentSearchActions: DocumentSearchActions {
+        DocumentSearchActions(
+            show: showSearch,
+            next: goToNextSearchHit,
+            previous: goToPreviousSearchHit
+        )
     }
 
     private func setLeft(_ mode: RendererMode) {
@@ -101,6 +135,20 @@ struct MarkdownDocumentView: View {
                 )
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if isShowingSearch {
+                DocumentSearchBar(
+                    query: $searchQuery,
+                    isCaseSensitive: $searchIsCaseSensitive,
+                    isFieldFocused: $searchFieldIsFocused,
+                    selectedIndex: selectedSearchHitIndex,
+                    hitCount: searchHits.count,
+                    onPrevious: goToPreviousSearchHit,
+                    onNext: goToNextSearchHit,
+                    onClose: hideSearch
+                )
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 if showRendererComparison {
@@ -127,10 +175,21 @@ struct MarkdownDocumentView: View {
             }
         }
         .focusedSceneValue(\.textualRendererIsVisible, textualRendererIsVisible)
+        .focusedSceneValue(\.documentSearchActions, documentSearchActions)
         .onChange(of: leftRaw)  { _, _ in scrollPosition.requestApply() }
         .onChange(of: rightRaw) { _, _ in scrollPosition.requestApply() }
         .onChange(of: fontSize) { _, _ in scrollPosition.requestApply() }
         .onChange(of: showRendererComparison) { _, _ in scrollPosition.requestApply() }
+        .onChange(of: autoReloadingDocument.document.text) { _, _ in
+            scrollPosition.requestApply()
+            synchronizeSearchSelection()
+        }
+        .onChange(of: searchQuery) { _, _ in
+            resetAndApplySearchSelection()
+        }
+        .onChange(of: searchIsCaseSensitive) { _, _ in
+            resetAndApplySearchSelection()
+        }
     }
 
     @ViewBuilder
@@ -267,16 +326,202 @@ struct MarkdownDocumentView: View {
             LogStore.shared.log("Font size → \(Int(fontSize))pt", level: .debug, category: "ui")
         }
     }
+
+    private func showSearch() {
+        withAnimation(.easeOut(duration: 0.12)) {
+            isShowingSearch = true
+        }
+        DispatchQueue.main.async {
+            searchFieldIsFocused = true
+        }
+        if !searchQuery.isEmpty {
+            applySelectedSearchHit()
+        }
+    }
+
+    private func hideSearch() {
+        withAnimation(.easeOut(duration: 0.12)) {
+            isShowingSearch = false
+        }
+        searchFieldIsFocused = false
+    }
+
+    private func goToNextSearchHit() {
+        showSearch()
+        guard !searchHits.isEmpty else {
+            selectedSearchHitIndex = 0
+            return
+        }
+        selectedSearchHitIndex = (selectedSearchHitIndex + 1) % searchHits.count
+        applySelectedSearchHit()
+    }
+
+    private func goToPreviousSearchHit() {
+        showSearch()
+        guard !searchHits.isEmpty else {
+            selectedSearchHitIndex = 0
+            return
+        }
+        selectedSearchHitIndex = (selectedSearchHitIndex - 1 + searchHits.count) % searchHits.count
+        applySelectedSearchHit()
+    }
+
+    private func resetAndApplySearchSelection() {
+        selectedSearchHitIndex = 0
+        applySelectedSearchHit()
+    }
+
+    private func synchronizeSearchSelection() {
+        if selectedSearchHitIndex >= searchHits.count {
+            selectedSearchHitIndex = max(searchHits.count - 1, 0)
+        }
+        applySelectedSearchHit()
+    }
+
+    private func applySelectedSearchHit() {
+        guard let selectedSearchHit else {
+            return
+        }
+
+        scrollPosition.update(
+            fraction: selectedSearchHit.scrollFraction,
+            source: "search",
+            broadcast: true
+        )
+        scrollPosition.requestApply()
+    }
+}
+
+private struct DocumentSearchHit {
+    let scrollFraction: CGFloat
+
+    static func matches(query: String, in text: String, isCaseSensitive: Bool) -> [DocumentSearchHit] {
+        guard !query.isEmpty, !text.isEmpty else {
+            return []
+        }
+
+        let options: String.CompareOptions = isCaseSensitive ? [] : [.caseInsensitive, .diacriticInsensitive]
+        let totalLength = max(text.utf16.count, 1)
+        var hits: [DocumentSearchHit] = []
+        var searchRange = text.startIndex..<text.endIndex
+
+        while let range = text.range(of: query, options: options, range: searchRange, locale: .current) {
+            let offset = text.utf16.distance(
+                from: text.utf16.startIndex,
+                to: range.lowerBound.samePosition(in: text.utf16) ?? text.utf16.startIndex
+            )
+            let fraction = CGFloat(offset) / CGFloat(totalLength)
+            hits.append(DocumentSearchHit(scrollFraction: min(max(fraction, 0), 1)))
+
+            if range.lowerBound == range.upperBound {
+                break
+            }
+            searchRange = range.upperBound..<text.endIndex
+        }
+
+        return hits
+    }
+}
+
+private struct DocumentSearchBar: View {
+    @Binding var query: String
+    @Binding var isCaseSensitive: Bool
+    var isFieldFocused: FocusState<Bool>.Binding
+    let selectedIndex: Int
+    let hitCount: Int
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+    let onClose: () -> Void
+
+    private var hitSummary: String {
+        guard !query.isEmpty else {
+            return "No search"
+        }
+        guard hitCount > 0 else {
+            return "0 hits"
+        }
+        return "\(min(selectedIndex + 1, hitCount)) of \(hitCount)"
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+
+            TextField("Search", text: $query)
+                .textFieldStyle(.roundedBorder)
+                .focused(isFieldFocused)
+                .frame(minWidth: 220, idealWidth: 320, maxWidth: 420)
+                .onSubmit(onNext)
+
+            Text(hitSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .frame(minWidth: 58, alignment: .trailing)
+
+            Button(action: onPrevious) {
+                Label("Previous Hit", systemImage: "chevron.up")
+                    .labelStyle(.iconOnly)
+            }
+            .disabled(hitCount == 0)
+            .help("Previous hit")
+
+            Button(action: onNext) {
+                Label("Next Hit", systemImage: "chevron.down")
+                    .labelStyle(.iconOnly)
+            }
+            .disabled(hitCount == 0)
+            .help("Next hit")
+
+            Toggle(isOn: $isCaseSensitive) {
+                Text("Aa")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 22)
+            }
+            .toggleStyle(.button)
+            .help("Case sensitive")
+
+            Button(action: onClose) {
+                Label("Close Search", systemImage: "xmark")
+                    .labelStyle(.iconOnly)
+            }
+            .keyboardShortcut(.cancelAction)
+            .help("Close search")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.bar)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+    }
+}
+
+struct DocumentSearchActions {
+    let show: () -> Void
+    let next: () -> Void
+    let previous: () -> Void
 }
 
 struct TextualRendererVisibleFocusedValueKey: FocusedValueKey {
     typealias Value = Bool
 }
 
+struct DocumentSearchActionsFocusedValueKey: FocusedValueKey {
+    typealias Value = DocumentSearchActions
+}
+
 extension FocusedValues {
     var textualRendererIsVisible: Bool? {
         get { self[TextualRendererVisibleFocusedValueKey.self] }
         set { self[TextualRendererVisibleFocusedValueKey.self] = newValue }
+    }
+
+    var documentSearchActions: DocumentSearchActions? {
+        get { self[DocumentSearchActionsFocusedValueKey.self] }
+        set { self[DocumentSearchActionsFocusedValueKey.self] = newValue }
     }
 }
 
