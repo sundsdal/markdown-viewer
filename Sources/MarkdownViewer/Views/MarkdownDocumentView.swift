@@ -15,6 +15,7 @@ struct MarkdownDocumentView: View {
     @State private var searchQuery = ""
     @State private var searchIsCaseSensitive = false
     @State private var selectedSearchHitIndex = 0
+    @State private var htmlRendererHitCount: Int = 0
     @FocusState private var searchFieldIsFocused: Bool
 
     init(document: MarkdownDocument, fileURL: URL? = nil) {
@@ -64,6 +65,9 @@ struct MarkdownDocumentView: View {
     private var document: MarkdownDocument {
         autoReloadingDocument.document
     }
+    private var activeSearchQuery: String {
+        isShowingSearch ? searchQuery : ""
+    }
     private var searchHits: [DocumentSearchHit] {
         DocumentSearchHit.matches(
             query: searchQuery,
@@ -77,12 +81,22 @@ struct MarkdownDocumentView: View {
         }
         return searchHits[min(max(selectedSearchHitIndex, 0), searchHits.count - 1)]
     }
+    private var activeRendererSupportsHighlight: Bool {
+        leftMode == .html
+    }
+    private var displayedSearchHitCount: Int {
+        activeRendererSupportsHighlight ? htmlRendererHitCount : searchHits.count
+    }
     private var documentSearchActions: DocumentSearchActions {
         DocumentSearchActions(
             show: showSearch,
             next: goToNextSearchHit,
             previous: goToPreviousSearchHit
         )
+    }
+    private var documentReloadAction: DocumentReloadAction {
+        let reload = autoReloadingDocument.reload
+        return DocumentReloadAction(reload: reload)
     }
 
     private func setLeft(_ mode: RendererMode) {
@@ -142,10 +156,12 @@ struct MarkdownDocumentView: View {
                     isCaseSensitive: $searchIsCaseSensitive,
                     isFieldFocused: $searchFieldIsFocused,
                     selectedIndex: selectedSearchHitIndex,
-                    hitCount: searchHits.count,
+                    hitCount: displayedSearchHitCount,
+                    rendererSupportsHighlight: activeRendererSupportsHighlight,
                     onPrevious: goToPreviousSearchHit,
                     onNext: goToNextSearchHit,
-                    onClose: hideSearch
+                    onClose: hideSearch,
+                    onSwitchToHTML: { setLeft(.html) }
                 )
             }
         }
@@ -161,10 +177,20 @@ struct MarkdownDocumentView: View {
                 } else {
                     rendererMenu("Renderer", selection: leftBinding)
                 }
-                Button(action: copyAll) {
-                    Label("Copy All", systemImage: "doc.on.doc")
+                Menu {
+                    Button(action: copyAsMarkdown) {
+                        Label("Copy as Markdown", systemImage: "doc.plaintext")
+                    }
+                    Button(action: copyAsRichText) {
+                        Label("Copy as Rich Text", systemImage: "doc.richtext")
+                    }
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                } primaryAction: {
+                    copyAsMarkdown()
                 }
-                .help("Copy entire document to clipboard")
+                .menuStyle(.borderlessButton)
+                .help("Copy document (click for Markdown, hold for options)")
                 Button(action: decreaseFontSize) {
                     Label("Decrease font", systemImage: "textformat.size.smaller")
                 }
@@ -176,7 +202,11 @@ struct MarkdownDocumentView: View {
         }
         .focusedSceneValue(\.textualRendererIsVisible, textualRendererIsVisible)
         .focusedSceneValue(\.documentSearchActions, documentSearchActions)
-        .onChange(of: leftRaw)  { _, _ in scrollPosition.requestApply() }
+        .focusedSceneValue(\.documentReloadAction, documentReloadAction)
+        .onChange(of: leftRaw)  { _, _ in
+            scrollPosition.requestApply()
+            htmlRendererHitCount = 0
+        }
         .onChange(of: rightRaw) { _, _ in scrollPosition.requestApply() }
         .onChange(of: fontSize) { _, _ in scrollPosition.requestApply() }
         .onChange(of: showRendererComparison) { _, _ in scrollPosition.requestApply() }
@@ -259,7 +289,18 @@ struct MarkdownDocumentView: View {
                 scrollPosition: scrollPosition,
                 scrollApplyToken: scrollPosition.applyToken,
                 source: source,
-                synchronizesScroll: showRendererComparison
+                synchronizesScroll: showRendererComparison,
+                searchQuery: activeSearchQuery,
+                searchIsCaseSensitive: searchIsCaseSensitive,
+                selectedSearchHitIndex: selectedSearchHitIndex,
+                onSearchHitCountChange: { count in
+                    htmlRendererHitCount = count
+                    if count == 0 {
+                        selectedSearchHitIndex = 0
+                    } else if selectedSearchHitIndex >= count {
+                        selectedSearchHitIndex = count - 1
+                    }
+                }
             )
         case .markdownUI:
             NativeMarkdownDocumentView(
@@ -307,10 +348,57 @@ struct MarkdownDocumentView: View {
         }
     }
 
-    private func copyAll() {
+    private func copyAsMarkdown() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(document.text, forType: .string)
-        LogStore.shared.log("Copied document to clipboard", level: .debug, category: "ui")
+        LogStore.shared.log("Copied document as Markdown", level: .debug, category: "ui")
+    }
+
+    private func copyAsRichText() {
+        let html = MarkdownHTMLRenderer.buildFullHTML(
+            markdown: renderableText,
+            fontSize: fontSize,
+            theme: selectedTheme
+        )
+
+        guard let htmlData = html.data(using: .utf8),
+              let attributed = try? NSAttributedString(
+                  data: htmlData,
+                  options: [
+                      .documentType: NSAttributedString.DocumentType.html,
+                      .characterEncoding: String.Encoding.utf8.rawValue
+                  ],
+                  documentAttributes: nil
+              )
+        else {
+            LogStore.shared.log("Rich text copy failed; falling back to Markdown", level: .warning, category: "ui")
+            copyAsMarkdown()
+            return
+        }
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        let fullRange = NSRange(location: 0, length: attributed.length)
+        let pasteboardItem = NSPasteboardItem()
+
+        if let rtfData = try? attributed.data(
+            from: fullRange,
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        ) {
+            pasteboardItem.setData(rtfData, forType: .rtf)
+        }
+
+        if let exportedHTMLData = try? attributed.data(
+            from: fullRange,
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.html]
+        ) {
+            pasteboardItem.setData(exportedHTMLData, forType: .html)
+        }
+
+        pasteboardItem.setString(attributed.string, forType: .string)
+        pasteboard.writeObjects([pasteboardItem])
+
+        LogStore.shared.log("Copied document as Rich Text", level: .debug, category: "ui")
     }
 
     private func decreaseFontSize() {
@@ -348,21 +436,23 @@ struct MarkdownDocumentView: View {
 
     private func goToNextSearchHit() {
         showSearch()
-        guard !searchHits.isEmpty else {
+        let count = displayedSearchHitCount
+        guard count > 0 else {
             selectedSearchHitIndex = 0
             return
         }
-        selectedSearchHitIndex = (selectedSearchHitIndex + 1) % searchHits.count
+        selectedSearchHitIndex = (selectedSearchHitIndex + 1) % count
         applySelectedSearchHit()
     }
 
     private func goToPreviousSearchHit() {
         showSearch()
-        guard !searchHits.isEmpty else {
+        let count = displayedSearchHitCount
+        guard count > 0 else {
             selectedSearchHitIndex = 0
             return
         }
-        selectedSearchHitIndex = (selectedSearchHitIndex - 1 + searchHits.count) % searchHits.count
+        selectedSearchHitIndex = (selectedSearchHitIndex - 1 + count) % count
         applySelectedSearchHit()
     }
 
@@ -372,13 +462,18 @@ struct MarkdownDocumentView: View {
     }
 
     private func synchronizeSearchSelection() {
-        if selectedSearchHitIndex >= searchHits.count {
-            selectedSearchHitIndex = max(searchHits.count - 1, 0)
+        let count = displayedSearchHitCount
+        if selectedSearchHitIndex >= count {
+            selectedSearchHitIndex = max(count - 1, 0)
         }
         applySelectedSearchHit()
     }
 
     private func applySelectedSearchHit() {
+        guard !activeRendererSupportsHighlight else {
+            // HTML renderer scrolls to the highlighted match itself via JS.
+            return
+        }
         guard let selectedSearchHit else {
             return
         }
@@ -429,9 +524,11 @@ private struct DocumentSearchBar: View {
     var isFieldFocused: FocusState<Bool>.Binding
     let selectedIndex: Int
     let hitCount: Int
+    let rendererSupportsHighlight: Bool
     let onPrevious: () -> Void
     let onNext: () -> Void
     let onClose: () -> Void
+    let onSwitchToHTML: () -> Void
 
     private var hitSummary: String {
         guard !query.isEmpty else {
@@ -444,53 +541,71 @@ private struct DocumentSearchBar: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
 
-            TextField("Search", text: $query)
-                .textFieldStyle(.roundedBorder)
-                .focused(isFieldFocused)
-                .frame(minWidth: 220, idealWidth: 320, maxWidth: 420)
-                .onSubmit(onNext)
+                TextField("Search", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .focused(isFieldFocused)
+                    .frame(minWidth: 220, idealWidth: 320, maxWidth: 420)
+                    .onSubmit(onNext)
 
-            Text(hitSummary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .frame(minWidth: 58, alignment: .trailing)
+                Text(hitSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(minWidth: 58, alignment: .trailing)
 
-            Button(action: onPrevious) {
-                Label("Previous Hit", systemImage: "chevron.up")
-                    .labelStyle(.iconOnly)
+                Button(action: onPrevious) {
+                    Label("Previous Hit", systemImage: "chevron.up")
+                        .labelStyle(.iconOnly)
+                }
+                .disabled(hitCount == 0)
+                .help("Previous hit")
+
+                Button(action: onNext) {
+                    Label("Next Hit", systemImage: "chevron.down")
+                        .labelStyle(.iconOnly)
+                }
+                .disabled(hitCount == 0)
+                .help("Next hit")
+
+                Toggle(isOn: $isCaseSensitive) {
+                    Text("Aa")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 22)
+                }
+                .toggleStyle(.button)
+                .help("Case sensitive")
+
+                Button(action: onClose) {
+                    Label("Close Search", systemImage: "xmark")
+                        .labelStyle(.iconOnly)
+                }
+                .keyboardShortcut(.cancelAction)
+                .help("Close search")
             }
-            .disabled(hitCount == 0)
-            .help("Previous hit")
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
 
-            Button(action: onNext) {
-                Label("Next Hit", systemImage: "chevron.down")
-                    .labelStyle(.iconOnly)
+            if !rendererSupportsHighlight && !query.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .foregroundStyle(.secondary)
+                    Text("Match highlighting is only available in the HTML renderer.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Switch to HTML", action: onSwitchToHTML)
+                        .buttonStyle(.link)
+                        .font(.caption)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
             }
-            .disabled(hitCount == 0)
-            .help("Next hit")
-
-            Toggle(isOn: $isCaseSensitive) {
-                Text("Aa")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 22)
-            }
-            .toggleStyle(.button)
-            .help("Case sensitive")
-
-            Button(action: onClose) {
-                Label("Close Search", systemImage: "xmark")
-                    .labelStyle(.iconOnly)
-            }
-            .keyboardShortcut(.cancelAction)
-            .help("Close search")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
         .overlay(alignment: .bottom) {
@@ -505,12 +620,20 @@ struct DocumentSearchActions {
     let previous: () -> Void
 }
 
+struct DocumentReloadAction {
+    let reload: () -> Void
+}
+
 struct TextualRendererVisibleFocusedValueKey: FocusedValueKey {
     typealias Value = Bool
 }
 
 struct DocumentSearchActionsFocusedValueKey: FocusedValueKey {
     typealias Value = DocumentSearchActions
+}
+
+struct DocumentReloadActionFocusedValueKey: FocusedValueKey {
+    typealias Value = DocumentReloadAction
 }
 
 extension FocusedValues {
@@ -522,6 +645,11 @@ extension FocusedValues {
     var documentSearchActions: DocumentSearchActions? {
         get { self[DocumentSearchActionsFocusedValueKey.self] }
         set { self[DocumentSearchActionsFocusedValueKey.self] = newValue }
+    }
+
+    var documentReloadAction: DocumentReloadAction? {
+        get { self[DocumentReloadActionFocusedValueKey.self] }
+        set { self[DocumentReloadActionFocusedValueKey.self] = newValue }
     }
 }
 

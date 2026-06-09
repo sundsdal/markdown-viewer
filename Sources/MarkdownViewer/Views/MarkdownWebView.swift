@@ -9,11 +9,16 @@ struct MarkdownWebView: NSViewRepresentable {
     let scrollApplyToken: UUID
     let source: String
     let synchronizesScroll: Bool
+    let searchQuery: String
+    let searchIsCaseSensitive: Bool
+    let selectedSearchHitIndex: Int
+    let onSearchHitCountChange: (Int) -> Void
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.suppressesIncrementalRendering = true
         config.userContentController.add(context.coordinator, name: "scrollPosition")
+        config.userContentController.add(context.coordinator, name: "searchHitCount")
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -27,14 +32,21 @@ struct MarkdownWebView: NSViewRepresentable {
         context.coordinator.scrollPosition = scrollPosition
         context.coordinator.source = source
         context.coordinator.synchronizesScroll = synchronizesScroll
+        context.coordinator.onSearchHitCountChange = onSearchHitCountChange
         let signature = documentSignature(markdown: markdown, fontSize: fontSize)
 
         if context.coordinator.loadedDocumentSignature != signature {
             context.coordinator.loadedDocumentSignature = signature
             context.coordinator.lastTheme = theme
+            context.coordinator.invalidateSearchHighlightCache()
             webView.loadHTMLString(buildFullHTML(markdown: markdown, fontSize: fontSize, theme: theme), baseURL: nil)
         } else {
             context.coordinator.applyThemeIfNeeded(theme)
+            context.coordinator.applySearchIfNeeded(
+                query: searchQuery,
+                isCaseSensitive: searchIsCaseSensitive,
+                selectedIndex: selectedSearchHitIndex
+            )
         }
 
         if context.coordinator.lastApplyToken != scrollApplyToken {
@@ -47,7 +59,11 @@ struct MarkdownWebView: NSViewRepresentable {
         Coordinator(
             scrollPosition: scrollPosition,
             source: source,
-            synchronizesScroll: synchronizesScroll
+            synchronizesScroll: synchronizesScroll,
+            searchQuery: searchQuery,
+            searchIsCaseSensitive: searchIsCaseSensitive,
+            selectedSearchHitIndex: selectedSearchHitIndex,
+            onSearchHitCountChange: onSearchHitCountChange
         )
     }
 
@@ -56,33 +72,73 @@ struct MarkdownWebView: NSViewRepresentable {
         var scrollPosition: RendererScrollPosition
         var source: String
         var synchronizesScroll: Bool
+        var onSearchHitCountChange: (Int) -> Void
         var loadedDocumentSignature: String?
         var lastApplyToken: UUID?
         var lastTheme: MarkdownTheme?
         private var isApplyingScroll = false
+        private var pendingSearchQuery: String
+        private var pendingSearchIsCaseSensitive: Bool
+        private var pendingSelectedSearchHitIndex: Int
+        private var appliedSearchQuery: String?
+        private var appliedSearchIsCaseSensitive: Bool?
+        private var appliedSelectedSearchHitIndex: Int?
+        private var hasFinishedInitialLoad = false
+        private var lastReportedHitCount = -1
 
-        init(scrollPosition: RendererScrollPosition, source: String, synchronizesScroll: Bool) {
+        init(
+            scrollPosition: RendererScrollPosition,
+            source: String,
+            synchronizesScroll: Bool,
+            searchQuery: String,
+            searchIsCaseSensitive: Bool,
+            selectedSearchHitIndex: Int,
+            onSearchHitCountChange: @escaping (Int) -> Void
+        ) {
             self.scrollPosition = scrollPosition
             self.source = source
             self.synchronizesScroll = synchronizesScroll
+            self.pendingSearchQuery = searchQuery
+            self.pendingSearchIsCaseSensitive = searchIsCaseSensitive
+            self.pendingSelectedSearchHitIndex = selectedSearchHitIndex
+            self.onSearchHitCountChange = onSearchHitCountChange
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            hasFinishedInitialLoad = true
+            appliedSearchQuery = nil
+            appliedSearchIsCaseSensitive = nil
+            appliedSelectedSearchHitIndex = nil
             applyScrollPositionIfNeeded()
+            applySearchIfNeeded(
+                query: pendingSearchQuery,
+                isCaseSensitive: pendingSearchIsCaseSensitive,
+                selectedIndex: pendingSelectedSearchHitIndex
+            )
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.name == "scrollPosition",
-                  !isApplyingScroll,
-                  let body = message.body as? [String: Any],
-                  let fraction = body["fraction"] as? Double else {
-                return
+            switch message.name {
+            case "scrollPosition":
+                guard !isApplyingScroll,
+                      let body = message.body as? [String: Any],
+                      let fraction = body["fraction"] as? Double else {
+                    return
+                }
+                scrollPosition.update(
+                    fraction: CGFloat(fraction),
+                    source: source,
+                    broadcast: synchronizesScroll
+                )
+            case "searchHitCount":
+                guard let count = message.body as? Int else { return }
+                if count != lastReportedHitCount {
+                    lastReportedHitCount = count
+                    onSearchHitCountChange(count)
+                }
+            default:
+                break
             }
-            scrollPosition.update(
-                fraction: CGFloat(fraction),
-                source: source,
-                broadcast: synchronizesScroll
-            )
         }
 
         func applyScrollPositionIfNeeded() {
@@ -121,6 +177,60 @@ struct MarkdownWebView: NSViewRepresentable {
             """
             webView.evaluateJavaScript(script)
         }
+
+        func applySearchIfNeeded(query: String, isCaseSensitive: Bool, selectedIndex: Int) {
+            pendingSearchQuery = query
+            pendingSearchIsCaseSensitive = isCaseSensitive
+            pendingSelectedSearchHitIndex = selectedIndex
+
+            guard hasFinishedInitialLoad, let webView else { return }
+
+            let queryChanged = appliedSearchQuery != query
+                || appliedSearchIsCaseSensitive != isCaseSensitive
+            let selectionChanged = appliedSelectedSearchHitIndex != selectedIndex
+
+            guard queryChanged || selectionChanged else { return }
+
+            if queryChanged {
+                appliedSearchQuery = query
+                appliedSearchIsCaseSensitive = isCaseSensitive
+                let escapedQuery = MarkdownWebView.escapeForJavaScriptStringLiteral(query)
+                let script = "window.__markdownFind && window.__markdownFind.applyHighlights('\(escapedQuery)', \(isCaseSensitive ? "true" : "false"), \(selectedIndex));"
+                webView.evaluateJavaScript(script)
+                appliedSelectedSearchHitIndex = selectedIndex
+            } else if selectionChanged {
+                appliedSelectedSearchHitIndex = selectedIndex
+                let script = "window.__markdownFind && window.__markdownFind.setSelected(\(selectedIndex));"
+                webView.evaluateJavaScript(script)
+            }
+        }
+
+        func invalidateSearchHighlightCache() {
+            appliedSearchQuery = nil
+            appliedSearchIsCaseSensitive = nil
+            appliedSelectedSearchHitIndex = nil
+            hasFinishedInitialLoad = false
+            lastReportedHitCount = -1
+        }
+    }
+
+    private static func escapeForJavaScriptStringLiteral(_ value: String) -> String {
+        var result = ""
+        result.reserveCapacity(value.count)
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\\": result += "\\\\"
+            case "'": result += "\\'"
+            case "\"": result += "\\\""
+            case "\n": result += "\\n"
+            case "\r": result += "\\r"
+            case "\t": result += "\\t"
+            case "\u{2028}": result += "\\u2028"
+            case "\u{2029}": result += "\\u2029"
+            default: result.unicodeScalars.append(scalar)
+            }
+        }
+        return result
     }
 
     private func loadHTML(in webView: WKWebView, context: Context) {
@@ -138,7 +248,7 @@ struct MarkdownWebView: NSViewRepresentable {
     // MARK: - Full HTML document
 
     private func buildFullHTML(markdown: String, fontSize: Double, theme: MarkdownTheme) -> String {
-        let body = renderMarkdownDocument(markdown)
+        let body = MarkdownHTMLRenderer.renderMarkdownDocument(markdown)
         return """
         <!DOCTYPE html>
         <html>
@@ -168,6 +278,124 @@ struct MarkdownWebView: NSViewRepresentable {
                 }, { passive: true });
 
                 window.addEventListener("load", reportScrollPosition);
+            })();
+
+            window.__markdownFind = (() => {
+                const HIT_CLASS = "markdown-find-hit";
+                const CURRENT_CLASS = "markdown-find-current";
+
+                function escapeRegex(value) {
+                    const specials = new Set([".", "*", "+", "?", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\\\"]);
+                    return Array.from(value, (character) => specials.has(character) ? "\\\\" + character : character).join("");
+                }
+
+                function postHitCount(count) {
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.searchHitCount) {
+                        window.webkit.messageHandlers.searchHitCount.postMessage(count);
+                    }
+                }
+
+                function clearHighlights() {
+                    const marks = document.querySelectorAll("mark." + HIT_CLASS);
+                    marks.forEach((mark) => {
+                        const parent = mark.parentNode;
+                        if (!parent) return;
+                        while (mark.firstChild) {
+                            parent.insertBefore(mark.firstChild, mark);
+                        }
+                        parent.removeChild(mark);
+                        parent.normalize();
+                    });
+                }
+
+                function collectTextNodes(root) {
+                    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+                        acceptNode(node) {
+                            if (!node.nodeValue || !node.nodeValue.length) {
+                                return NodeFilter.FILTER_REJECT;
+                            }
+                            const parent = node.parentNode;
+                            if (!parent) return NodeFilter.FILTER_REJECT;
+                            const tag = parent.nodeName;
+                            if (tag === "SCRIPT" || tag === "STYLE" || tag === "MARK") {
+                                return NodeFilter.FILTER_REJECT;
+                            }
+                            return NodeFilter.FILTER_ACCEPT;
+                        }
+                    });
+                    const nodes = [];
+                    let current;
+                    while ((current = walker.nextNode())) {
+                        nodes.push(current);
+                    }
+                    return nodes;
+                }
+
+                function applyHighlights(query, caseSensitive, selectedIndex) {
+                    clearHighlights();
+                    if (!query) {
+                        postHitCount(0);
+                        return 0;
+                    }
+                    const flags = caseSensitive ? "g" : "gi";
+                    const regex = new RegExp(escapeRegex(query), flags);
+                    const nodes = collectTextNodes(document.body);
+                    let count = 0;
+
+                    for (const node of nodes) {
+                        const text = node.nodeValue;
+                        regex.lastIndex = 0;
+                        let lastIndex = 0;
+                        const fragments = [];
+                        let match;
+                        while ((match = regex.exec(text)) !== null) {
+                            if (match.index > lastIndex) {
+                                fragments.push(document.createTextNode(text.substring(lastIndex, match.index)));
+                            }
+                            const mark = document.createElement("mark");
+                            mark.className = HIT_CLASS;
+                            mark.appendChild(document.createTextNode(match[0]));
+                            fragments.push(mark);
+                            lastIndex = regex.lastIndex;
+                            count += 1;
+                            if (match.index === regex.lastIndex) {
+                                regex.lastIndex += 1;
+                            }
+                        }
+                        if (fragments.length) {
+                            if (lastIndex < text.length) {
+                                fragments.push(document.createTextNode(text.substring(lastIndex)));
+                            }
+                            const parent = node.parentNode;
+                            for (const fragment of fragments) {
+                                parent.insertBefore(fragment, node);
+                            }
+                            parent.removeChild(node);
+                        }
+                    }
+
+                    if (count > 0) {
+                        setSelected(selectedIndex);
+                    }
+                    postHitCount(count);
+                    return count;
+                }
+
+                function setSelected(index) {
+                    const marks = document.querySelectorAll("mark." + HIT_CLASS);
+                    document.querySelectorAll("mark." + CURRENT_CLASS).forEach((m) => m.classList.remove(CURRENT_CLASS));
+                    if (!marks.length) return;
+                    const clamped = Math.max(0, Math.min(index, marks.length - 1));
+                    const target = marks[clamped];
+                    target.classList.add(CURRENT_CLASS);
+                    const rect = target.getBoundingClientRect();
+                    const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+                    if (rect.top < 80 || rect.bottom > viewportHeight - 80) {
+                        target.scrollIntoView({ block: "center", behavior: "auto" });
+                    }
+                }
+
+                return { applyHighlights, setSelected, clearHighlights };
             })();
         </script>
         <style id="__markdown_theme_variables__">
@@ -371,6 +599,18 @@ struct MarkdownWebView: NSViewRepresentable {
             .sy-keyword { color: var(--md-syntax-keyword); }
             .sy-boolean { color: var(--md-syntax-boolean); }
             .sy-punctuation { color: var(--md-syntax-punctuation); }
+            mark.markdown-find-hit {
+                background: rgba(255, 213, 0, 0.55);
+                color: inherit;
+                border-radius: 2px;
+                padding: 0 1px;
+                box-shadow: 0 0 0 1px rgba(255, 213, 0, 0.55);
+            }
+            mark.markdown-find-current {
+                background: rgba(255, 138, 0, 0.95);
+                color: #1a1a1a;
+                box-shadow: 0 0 0 1px rgba(255, 138, 0, 0.95), 0 0 0 3px rgba(255, 138, 0, 0.25);
+            }
         </style>
         </head>
         <body>
@@ -380,781 +620,4 @@ struct MarkdownWebView: NSViewRepresentable {
         """
     }
 
-    // MARK: - Document sections
-
-    private func renderMarkdownDocument(_ text: String) -> String {
-        guard let frontMatter = splitFrontMatter(from: text) else {
-            return markdownToHTML(text)
-        }
-
-        let frontMatterHTML = renderFrontMatter(frontMatter.yaml)
-        let markdownHTML = markdownToHTML(frontMatter.body)
-        if markdownHTML.isEmpty {
-            return frontMatterHTML
-        }
-        return [frontMatterHTML, markdownHTML].joined(separator: "\n")
-    }
-
-    private func splitFrontMatter(from text: String) -> (yaml: String, body: String)? {
-        let textWithoutBOM = text.hasPrefix("\u{feff}") ? String(text.dropFirst()) : text
-        let lines = textWithoutBOM.components(separatedBy: "\n")
-
-        guard lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == "---" else {
-            return nil
-        }
-
-        for index in lines.indices.dropFirst() {
-            let trimmed = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed == "---" || trimmed == "..." {
-                let yaml = lines[1..<index].joined(separator: "\n")
-                let body = index + 1 < lines.count ? lines[(index + 1)...].joined(separator: "\n") : ""
-                return (yaml, body)
-            }
-        }
-
-        return nil
-    }
-
-    // MARK: - Frontmatter rendering
-
-    private struct FrontMatterEntry {
-        let key: String
-        let value: FrontMatterValue
-    }
-
-    private enum FrontMatterValue {
-        case scalar(String, FrontMatterScalarKind)
-        case list([String])
-        case textBlock(String)
-        case yamlBlock(String)
-        case empty
-    }
-
-    private enum FrontMatterScalarKind {
-        case string
-        case number
-        case boolean
-        case null
-        case date
-    }
-
-    private func renderFrontMatter(_ yaml: String) -> String {
-        return """
-        <section class="frontmatter" aria-label="Frontmatter">
-        <div class="frontmatter-header">
-        <span class="frontmatter-title">frontmatter</span>
-        <span class="frontmatter-delimiter">---</span>
-        </div>
-        <pre class="frontmatter-code"><code>\(highlightCode(yaml, language: "yaml"))</code></pre>
-        <div class="frontmatter-footer">---</div>
-        </section>
-        """
-    }
-
-    private func renderFrontMatterValue(_ value: FrontMatterValue) -> String {
-        switch value {
-        case .scalar(let text, .string):
-            return renderYAMLStringToken(text)
-        case .scalar(let text, .number):
-            return "<span class=\"frontmatter-number\">\(escapeHTML(text))</span>"
-        case .scalar(let text, .boolean):
-            return "<span class=\"frontmatter-boolean\">\(escapeHTML(text.lowercased()))</span>"
-        case .scalar(let text, .null):
-            return "<span class=\"frontmatter-null\">\(escapeHTML(text == "~" ? "null" : text.lowercased()))</span>"
-        case .scalar(let text, .date):
-            return "<span class=\"frontmatter-date\">\(escapeHTML(text))</span>"
-        case .list(let values):
-            guard !values.isEmpty else {
-                return "<span class=\"frontmatter-null\">[]</span>"
-            }
-            let items = values.map { renderYAMLStringToken($0) }.joined(separator: "<span class=\"frontmatter-punctuation\">, </span>")
-            return """
-            <span class="frontmatter-array"><span class="frontmatter-punctuation">[</span>\(items)<span class="frontmatter-punctuation">]</span></span>
-            """
-        case .textBlock(let text):
-            return "<pre class=\"frontmatter-block\"><code>\(escapeHTML(text))</code></pre>"
-        case .yamlBlock(let text):
-            return "<pre class=\"frontmatter-block\"><code>\(highlightCode(text, language: "yaml"))</code></pre>"
-        case .empty:
-            return "<span class=\"frontmatter-null\">empty</span>"
-        }
-    }
-
-    private func renderYAMLStringToken(_ text: String) -> String {
-        let quoted = "\"\(text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\""))\""
-        return "<span class=\"frontmatter-string\">\(escapeHTML(quoted))</span>"
-    }
-
-    private func parseFrontMatterEntries(_ yaml: String) -> [FrontMatterEntry] {
-        let lines = yaml.components(separatedBy: "\n").map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "\r")) }
-        var entries: [FrontMatterEntry] = []
-        var index = 0
-
-        while index < lines.count {
-            let line = lines[index]
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else {
-                index += 1
-                continue
-            }
-
-            guard isTopLevelYAMLKey(line), let colonIndex = firstYAMLKeyColon(in: line) else {
-                return []
-            }
-
-            let rawKey = String(line[..<colonIndex]).trimmingCharacters(in: .whitespaces)
-            let key = unquoteYAMLString(rawKey)
-            let rawValue = String(line[line.index(after: colonIndex)...])
-            let valueText = stripYAMLComment(from: rawValue).trimmingCharacters(in: .whitespaces)
-
-            if valueText.isEmpty || isYAMLBlockScalarIndicator(valueText) {
-                let blockStart = index + 1
-                var blockEnd = blockStart
-                while blockEnd < lines.count, !isTopLevelYAMLKey(lines[blockEnd]) {
-                    blockEnd += 1
-                }
-                let block = normalizeYAMLBlock(Array(lines[blockStart..<blockEnd]))
-                let value = parseYAMLBlockValue(block, indicator: valueText)
-                entries.append(FrontMatterEntry(key: key, value: value))
-                index = blockEnd
-            } else {
-                entries.append(FrontMatterEntry(key: key, value: parseInlineYAMLValue(valueText)))
-                index += 1
-            }
-        }
-
-        return entries
-    }
-
-    private func isTopLevelYAMLKey(_ line: String) -> Bool {
-        guard let first = line.first,
-              !first.isWhitespace,
-              first != "-",
-              !line.trimmingCharacters(in: .whitespaces).hasPrefix("#") else {
-            return false
-        }
-        return firstYAMLKeyColon(in: line) != nil
-    }
-
-    private func firstYAMLKeyColon(in line: String) -> String.Index? {
-        var inSingleQuote = false
-        var inDoubleQuote = false
-        var isEscaped = false
-
-        for index in line.indices {
-            let character = line[index]
-
-            if inDoubleQuote, character == "\\", !isEscaped {
-                isEscaped = true
-                continue
-            }
-
-            if character == "'", !inDoubleQuote {
-                inSingleQuote.toggle()
-            } else if character == "\"", !inSingleQuote, !isEscaped {
-                inDoubleQuote.toggle()
-            } else if character == ":", !inSingleQuote, !inDoubleQuote {
-                let nextIndex = line.index(after: index)
-                if nextIndex == line.endIndex || line[nextIndex].isWhitespace {
-                    return index
-                }
-            }
-
-            isEscaped = false
-        }
-
-        return nil
-    }
-
-    private func stripYAMLComment(from text: String) -> String {
-        var inSingleQuote = false
-        var inDoubleQuote = false
-        var isEscaped = false
-        var previous: Character?
-
-        for index in text.indices {
-            let character = text[index]
-
-            if inDoubleQuote, character == "\\", !isEscaped {
-                isEscaped = true
-                previous = character
-                continue
-            }
-
-            if character == "'", !inDoubleQuote {
-                inSingleQuote.toggle()
-            } else if character == "\"", !inSingleQuote, !isEscaped {
-                inDoubleQuote.toggle()
-            } else if character == "#", !inSingleQuote, !inDoubleQuote,
-                      previous == nil || previous?.isWhitespace == true {
-                return String(text[..<index])
-            }
-
-            previous = character
-            isEscaped = false
-        }
-
-        return text
-    }
-
-    private func isYAMLBlockScalarIndicator(_ value: String) -> Bool {
-        value.hasPrefix("|") || value.hasPrefix(">")
-    }
-
-    private func parseYAMLBlockValue(_ block: String, indicator: String) -> FrontMatterValue {
-        let trimmed = block.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !trimmed.isEmpty else {
-            return .empty
-        }
-
-        if indicator.hasPrefix("|") {
-            return .textBlock(trimmed)
-        }
-
-        if indicator.hasPrefix(">") {
-            return .textBlock(foldYAMLBlock(trimmed))
-        }
-
-        let nonEmptyLines = trimmed.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
-
-        if !nonEmptyLines.isEmpty, nonEmptyLines.allSatisfy({ $0.hasPrefix("- ") || $0 == "-" }) {
-            let items = nonEmptyLines.map { line in
-                let item = line == "-" ? "" : String(line.dropFirst(2))
-                return unquoteYAMLString(stripYAMLComment(from: item).trimmingCharacters(in: .whitespaces))
-            }
-            return .list(items)
-        }
-
-        return .yamlBlock(trimmed)
-    }
-
-    private func parseInlineYAMLValue(_ value: String) -> FrontMatterValue {
-        let trimmed = stripYAMLComment(from: value).trimmingCharacters(in: .whitespaces)
-
-        guard !trimmed.isEmpty else {
-            return .empty
-        }
-
-        if trimmed == "[]" {
-            return .list([])
-        }
-
-        if trimmed.hasPrefix("["), trimmed.hasSuffix("]") {
-            let inner = String(trimmed.dropFirst().dropLast())
-            let items = splitYAMLInlineList(inner)
-                .map { unquoteYAMLString($0.trimmingCharacters(in: .whitespaces)) }
-                .filter { !$0.isEmpty }
-            return .list(items)
-        }
-
-        if trimmed.hasPrefix("{"), trimmed.hasSuffix("}") {
-            return .yamlBlock(trimmed)
-        }
-
-        let normalized = trimmed.lowercased()
-        if ["true", "false", "yes", "no", "on", "off"].contains(normalized) {
-            return .scalar(trimmed, .boolean)
-        }
-
-        if ["null", "~"].contains(normalized) {
-            return .scalar(trimmed, .null)
-        }
-
-        let unquoted = unquoteYAMLString(trimmed)
-
-        if isYAMLDate(unquoted) {
-            return .scalar(unquoted, .date)
-        }
-
-        if isYAMLNumber(unquoted) {
-            return .scalar(unquoted, .number)
-        }
-
-        return .scalar(unquoted, .string)
-    }
-
-    private func normalizeYAMLBlock(_ lines: [String]) -> String {
-        var blockLines = lines
-
-        while blockLines.first?.trimmingCharacters(in: .whitespaces).isEmpty == true {
-            blockLines.removeFirst()
-        }
-
-        while blockLines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
-            blockLines.removeLast()
-        }
-
-        let indentation = blockLines
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-            .map { line in line.prefix(while: { $0 == " " || $0 == "\t" }).count }
-            .min() ?? 0
-
-        return blockLines.map { line in
-            guard line.count >= indentation else { return line }
-            return String(line.dropFirst(indentation))
-        }.joined(separator: "\n")
-    }
-
-    private func foldYAMLBlock(_ block: String) -> String {
-        block.components(separatedBy: "\n")
-            .reduce(into: [String]()) { paragraphs, line in
-                if line.trimmingCharacters(in: .whitespaces).isEmpty {
-                    paragraphs.append("")
-                } else if let last = paragraphs.indices.last, !paragraphs[last].isEmpty {
-                    paragraphs[last] += " " + line.trimmingCharacters(in: .whitespaces)
-                } else {
-                    paragraphs.append(line.trimmingCharacters(in: .whitespaces))
-                }
-            }
-            .joined(separator: "\n")
-    }
-
-    private func splitYAMLInlineList(_ text: String) -> [String] {
-        var items: [String] = []
-        var current = ""
-        var inSingleQuote = false
-        var inDoubleQuote = false
-        var isEscaped = false
-        var nestingDepth = 0
-
-        for character in text {
-            if inDoubleQuote, character == "\\", !isEscaped {
-                isEscaped = true
-                current.append(character)
-                continue
-            }
-
-            if character == "'", !inDoubleQuote {
-                inSingleQuote.toggle()
-            } else if character == "\"", !inSingleQuote, !isEscaped {
-                inDoubleQuote.toggle()
-            } else if !inSingleQuote, !inDoubleQuote {
-                if character == "[" || character == "{" {
-                    nestingDepth += 1
-                } else if character == "]" || character == "}" {
-                    nestingDepth = max(0, nestingDepth - 1)
-                } else if character == ",", nestingDepth == 0 {
-                    items.append(current)
-                    current = ""
-                    continue
-                }
-            }
-
-            current.append(character)
-            isEscaped = false
-        }
-
-        if !current.isEmpty {
-            items.append(current)
-        }
-
-        return items
-    }
-
-    private func unquoteYAMLString(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespaces)
-
-        if trimmed.count >= 2, trimmed.hasPrefix("'"), trimmed.hasSuffix("'") {
-            return String(trimmed.dropFirst().dropLast()).replacingOccurrences(of: "''", with: "'")
-        }
-
-        if trimmed.count >= 2, trimmed.hasPrefix("\""), trimmed.hasSuffix("\"") {
-            return String(trimmed.dropFirst().dropLast())
-                .replacingOccurrences(of: "\\\"", with: "\"")
-                .replacingOccurrences(of: "\\\\", with: "\\")
-                .replacingOccurrences(of: "\\n", with: "\n")
-                .replacingOccurrences(of: "\\t", with: "\t")
-        }
-
-        return trimmed
-    }
-
-    private func isYAMLDate(_ value: String) -> Bool {
-        value.range(
-            of: #"^\d{4}-\d{2}-\d{2}(?:[Tt ][0-9:.+-]+)?$"#,
-            options: .regularExpression
-        ) != nil
-    }
-
-    private func isYAMLNumber(_ value: String) -> Bool {
-        value.range(
-            of: #"^[+-]?(?:\d[\d_]*(?:\.\d[\d_]*)?|\.\d[\d_]*)(?:[eE][+-]?\d[\d_]*)?$"#,
-            options: .regularExpression
-        ) != nil
-    }
-
-    // MARK: - Markdown → HTML
-
-    private func markdownToHTML(_ text: String) -> String {
-        let lines = text.components(separatedBy: "\n")
-        var html: [String] = []
-        var i = 0
-        var inCodeBlock = false
-        var codeLanguage = ""
-        var codeLines: [String] = []
-        var inList = false
-        var listType = ""
-
-        while i < lines.count {
-            let line = lines[i]
-
-            // Fenced code blocks
-            if line.hasPrefix("```") {
-                if inCodeBlock {
-                    let code = codeLines.joined(separator: "\n")
-                    let highlighted = highlightCode(code, language: codeLanguage)
-                    html.append("<pre><code>\(highlighted)</code></pre>")
-                    codeLines = []
-                    inCodeBlock = false
-                    codeLanguage = ""
-                } else {
-                    closeList(&html, &inList, &listType)
-                    inCodeBlock = true
-                    codeLanguage = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces).lowercased()
-                }
-                i += 1
-                continue
-            }
-
-            if inCodeBlock {
-                codeLines.append(line)
-                i += 1
-                continue
-            }
-
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-
-            if trimmed.isEmpty {
-                closeList(&html, &inList, &listType)
-                i += 1
-                continue
-            }
-
-            if let (level, content) = parseHeading(line) {
-                closeList(&html, &inList, &listType)
-                html.append("<h\(level)>\(inlineMarkdown(content))</h\(level)>")
-                i += 1
-                continue
-            }
-
-            if isHorizontalRule(trimmed) {
-                closeList(&html, &inList, &listType)
-                html.append("<hr>")
-                i += 1
-                continue
-            }
-
-            if trimmed.hasPrefix(">") {
-                closeList(&html, &inList, &listType)
-                var quoteLines: [String] = []
-                while i < lines.count {
-                    let ql = lines[i]
-                    if ql.trimmingCharacters(in: .whitespaces).hasPrefix(">") {
-                        let content = String(ql.drop(while: { $0 == " " }).dropFirst().drop(while: { $0 == " " }))
-                        quoteLines.append(content)
-                        i += 1
-                    } else { break }
-                }
-                html.append("<blockquote>\(inlineMarkdown(quoteLines.joined(separator: "<br>")))</blockquote>")
-                continue
-            }
-
-            // Table: current line has pipes AND next line is a separator row
-            if trimmed.contains("|"),
-               i + 1 < lines.count,
-               isTableSeparator(lines[i + 1]) {
-                closeList(&html, &inList, &listType)
-                html.append(parseTable(lines, &i))
-                continue
-            }
-
-            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
-                if !inList || listType != "ul" {
-                    closeList(&html, &inList, &listType)
-                    html.append("<ul>")
-                    inList = true
-                    listType = "ul"
-                }
-                html.append("<li>\(inlineMarkdown(String(trimmed.dropFirst(2))))</li>")
-                i += 1
-                continue
-            }
-
-            if let range = trimmed.range(of: #"^\d+\.\s"#, options: .regularExpression) {
-                if !inList || listType != "ol" {
-                    closeList(&html, &inList, &listType)
-                    html.append("<ol>")
-                    inList = true
-                    listType = "ol"
-                }
-                html.append("<li>\(inlineMarkdown(String(trimmed[range.upperBound...])))</li>")
-                i += 1
-                continue
-            }
-
-            closeList(&html, &inList, &listType)
-            html.append("<p>\(inlineMarkdown(trimmed))</p>")
-            i += 1
-        }
-
-        if inCodeBlock {
-            let code = codeLines.joined(separator: "\n")
-            html.append("<pre><code>\(highlightCode(code, language: codeLanguage))</code></pre>")
-        }
-        closeList(&html, &inList, &listType)
-
-        return html.joined(separator: "\n")
-    }
-
-    // MARK: - Table parsing
-
-    private func isTableSeparator(_ line: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        return trimmed.contains("|") && trimmed.contains("-")
-            && trimmed.allSatisfy({ $0 == "|" || $0 == "-" || $0 == ":" || $0 == " " })
-    }
-
-    private func parseTable(_ lines: [String], _ i: inout Int) -> String {
-        var rows: [[String]] = []
-        // Header row
-        rows.append(parseTableRow(lines[i]))
-        i += 1
-        // Skip separator row
-        if i < lines.count && isTableSeparator(lines[i]) { i += 1 }
-        // Body rows
-        while i < lines.count && lines[i].contains("|") {
-            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { break }
-            rows.append(parseTableRow(lines[i]))
-            i += 1
-        }
-        var html = "<table><thead><tr>"
-        if let header = rows.first {
-            for cell in header {
-                html += "<th>\(inlineMarkdown(cell.trimmingCharacters(in: .whitespaces)))</th>"
-            }
-        }
-        html += "</tr></thead><tbody>"
-        for row in rows.dropFirst() {
-            html += "<tr>"
-            for cell in row {
-                html += "<td>\(inlineMarkdown(cell.trimmingCharacters(in: .whitespaces)))</td>"
-            }
-            html += "</tr>"
-        }
-        html += "</tbody></table>"
-        return html
-    }
-
-    private func parseTableRow(_ line: String) -> [String] {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        let stripped = trimmed.hasPrefix("|") ? String(trimmed.dropFirst()) : trimmed
-        let end = stripped.hasSuffix("|") ? String(stripped.dropLast()) : stripped
-        return end.components(separatedBy: "|")
-    }
-
-    // MARK: - Helpers
-
-    private func closeList(_ html: inout [String], _ inList: inout Bool, _ listType: inout String) {
-        if inList {
-            html.append("</\(listType)>")
-            inList = false
-            listType = ""
-        }
-    }
-
-    private func parseHeading(_ line: String) -> (Int, String)? {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        var level = 0
-        for ch in trimmed {
-            if ch == "#" { level += 1 } else { break }
-        }
-        guard level >= 1, level <= 6, trimmed.count > level,
-              trimmed[trimmed.index(trimmed.startIndex, offsetBy: level)] == " " else {
-            return nil
-        }
-        return (level, String(trimmed.dropFirst(level + 1)))
-    }
-
-    private func isHorizontalRule(_ trimmed: String) -> Bool {
-        trimmed.allSatisfy({ $0 == "-" || $0 == "*" || $0 == "_" || $0 == " " })
-            && trimmed.filter({ $0 != " " }).count >= 3
-            && Set(trimmed.filter({ $0 != " " })).count == 1
-    }
-
-    private func inlineMarkdown(_ text: String) -> String {
-        var result = escapeHTML(text)
-        result = result.replacingOccurrences(
-            of: #"!\[([^\]]*)\]\(([^)]+)\)"#, with: "<img src=\"$2\" alt=\"$1\">", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"\[([^\]]+)\]\(([^)]+)\)"#, with: "<a href=\"$2\">$1</a>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"\*\*\*(.+?)\*\*\*"#, with: "<strong><em>$1</em></strong>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"\*\*(.+?)\*\*"#, with: "<strong>$1</strong>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"__(.+?)__"#, with: "<strong>$1</strong>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"#, with: "<em>$1</em>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"~~(.+?)~~"#, with: "<del>$1</del>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"`([^`]+)`"#, with: "<code>$1</code>", options: .regularExpression)
-        return result
-    }
-
-    private func escapeHTML(_ text: String) -> String {
-        text.replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&#39;")
-    }
-
-    // MARK: - Syntax highlighting
-
-    private func highlightCode(_ code: String, language: String) -> String {
-        let escaped = escapeHTML(code)
-        switch language {
-        case "yaml", "yml": return highlightYAML(escaped)
-        case "json": return highlightJSON(escaped)
-        case "swift": return highlightSwift(escaped)
-        case "javascript", "js", "typescript", "ts": return highlightJS(escaped)
-        case "python", "py": return highlightPython(escaped)
-        case "shell", "bash", "sh", "zsh": return highlightShell(escaped)
-        default: return escaped
-        }
-    }
-
-    private func highlightYAML(_ code: String) -> String {
-        var result: [String] = []
-        for line in code.components(separatedBy: "\n") {
-            var highlighted = line
-            if let range = highlighted.range(of: #"(#.*)$"#, options: .regularExpression) {
-                let comment = highlighted[range]
-                highlighted = highlighted.replacingCharacters(in: range, with: "<span class=\"sy-comment\">\(comment)</span>")
-                result.append(highlighted)
-                continue
-            }
-            if let range = highlighted.range(of: #"^(\s*)([\w\-./&quot;@][^:]*?)(:)"#, options: .regularExpression) {
-                let match = String(highlighted[range])
-                let replaced = match.replacingOccurrences(
-                    of: #"^(\s*)([\w\-./&quot;@][^:]*?)(:)"#,
-                    with: "$1<span class=\"sy-key\">$2</span><span class=\"sy-punctuation\">$3</span>",
-                    options: .regularExpression
-                )
-                highlighted = replaced + String(highlighted[range.upperBound...])
-            }
-            highlighted = highlighted.replacingOccurrences(
-                of: #"(&#39;[^&#]*?&#39;|&quot;[^&]*?&quot;)"#,
-                with: "<span class=\"sy-string\">$1</span>", options: .regularExpression)
-            highlighted = highlighted.replacingOccurrences(
-                of: #"\b(true|false|yes|no|null|~)\b"#,
-                with: "<span class=\"sy-boolean\">$1</span>", options: .regularExpression)
-            highlighted = highlighted.replacingOccurrences(
-                of: #"(?<=:\s)(\d+\.?\d*)\b"#,
-                with: "<span class=\"sy-number\">$1</span>", options: .regularExpression)
-            result.append(highlighted)
-        }
-        return result.joined(separator: "\n")
-    }
-
-    private func highlightJSON(_ code: String) -> String {
-        var result = code
-        result = result.replacingOccurrences(
-            of: #"(&quot;[^&]*?&quot;)(\s*:)"#,
-            with: "<span class=\"sy-key\">$1</span><span class=\"sy-punctuation\">$2</span>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"(:\s*)(&quot;[^&]*?&quot;)"#,
-            with: "$1<span class=\"sy-string\">$2</span>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"\b(\d+\.?\d*)\b"#,
-            with: "<span class=\"sy-number\">$1</span>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"\b(true|false|null)\b"#,
-            with: "<span class=\"sy-boolean\">$1</span>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"([\{\}\[\]])"#,
-            with: "<span class=\"sy-punctuation\">$1</span>", options: .regularExpression)
-        return result
-    }
-
-    private func highlightSwift(_ code: String) -> String {
-        let keywords = [
-            "import", "func", "var", "let", "struct", "class", "enum", "protocol",
-            "if", "else", "guard", "switch", "case", "default", "for", "while", "repeat",
-            "return", "throw", "throws", "try", "catch", "do", "break", "continue",
-            "public", "private", "internal", "fileprivate", "open", "static", "override",
-            "init", "deinit", "self", "Self", "super", "nil", "true", "false",
-            "async", "await", "actor", "some", "any", "where", "in", "as", "is",
-            "@State", "@Binding", "@Published", "@Observable", "@Environment",
-            "@AppStorage", "@main", "@escaping", "@objc", "@MainActor",
-        ]
-        return highlightGeneric(code, keywords: keywords, lineComment: "//")
-    }
-
-    private func highlightJS(_ code: String) -> String {
-        let keywords = [
-            "import", "export", "from", "default", "function", "const", "let", "var",
-            "if", "else", "switch", "case", "for", "while", "do", "return", "throw",
-            "try", "catch", "finally", "new", "delete", "typeof", "instanceof",
-            "class", "extends", "constructor", "this", "super", "async", "await",
-            "true", "false", "null", "undefined", "of", "in", "type", "interface",
-            "enum", "implements", "readonly", "abstract", "as",
-        ]
-        return highlightGeneric(code, keywords: keywords, lineComment: "//")
-    }
-
-    private func highlightPython(_ code: String) -> String {
-        let keywords = [
-            "import", "from", "def", "class", "if", "elif", "else", "for", "while",
-            "return", "yield", "try", "except", "finally", "raise", "with", "as",
-            "pass", "break", "continue", "and", "or", "not", "in", "is", "lambda",
-            "True", "False", "None", "self", "async", "await", "global", "nonlocal",
-        ]
-        return highlightGeneric(code, keywords: keywords, lineComment: "#")
-    }
-
-    private func highlightShell(_ code: String) -> String {
-        let keywords = [
-            "if", "then", "else", "elif", "fi", "for", "while", "do", "done",
-            "case", "esac", "function", "return", "exit", "export", "local",
-            "echo", "cd", "ls", "rm", "cp", "mv", "mkdir", "grep", "sed", "awk",
-            "cat", "curl", "wget", "git", "npm", "npx", "yarn", "pnpm",
-            "true", "false",
-        ]
-        return highlightGeneric(code, keywords: keywords, lineComment: "#")
-    }
-
-    private func highlightGeneric(_ code: String, keywords: [String], lineComment: String) -> String {
-        var result = code
-        result = result.replacingOccurrences(
-            of: "(\(NSRegularExpression.escapedPattern(for: lineComment)).*)",
-            with: "<span class=\"sy-comment\">$1</span>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"(&quot;[^&]*?&quot;)"#,
-            with: "<span class=\"sy-string\">$1</span>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"(&#39;[^&#]*?&#39;)"#,
-            with: "<span class=\"sy-string\">$1</span>", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"\b(\d+\.?\d*)\b"#,
-            with: "<span class=\"sy-number\">$1</span>", options: .regularExpression)
-        for kw in keywords {
-            if kw.hasPrefix("@") {
-                result = result.replacingOccurrences(
-                    of: "(\(NSRegularExpression.escapedPattern(for: kw)))\\b",
-                    with: "<span class=\"sy-keyword\">$1</span>", options: .regularExpression)
-            } else {
-                result = result.replacingOccurrences(
-                    of: "\\b(\(NSRegularExpression.escapedPattern(for: kw)))\\b",
-                    with: "<span class=\"sy-keyword\">$1</span>", options: .regularExpression)
-            }
-        }
-        return result
-    }
 }

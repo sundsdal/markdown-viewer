@@ -27,6 +27,7 @@ struct MarkdownViewerApp: App {
         .commands {
             RendererCommands()
             SearchCommands()
+            ReloadCommands()
             DebugCommands()
             DefaultMarkdownOpenerCommands()
         }
@@ -220,6 +221,20 @@ private enum DefaultMarkdownOpener {
             identifiers.append(filenameContentType)
         }
         return identifiers
+    }
+}
+
+private struct ReloadCommands: Commands {
+    @FocusedValue(\.documentReloadAction) private var documentReloadAction
+
+    var body: some Commands {
+        CommandGroup(after: .newItem) {
+            Button("Reload from Disk") {
+                documentReloadAction?.reload()
+            }
+            .keyboardShortcut("r", modifiers: [.command])
+            .disabled(documentReloadAction == nil)
+        }
     }
 }
 
