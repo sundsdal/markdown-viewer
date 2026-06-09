@@ -379,22 +379,24 @@ struct MarkdownDocumentView: View {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         let fullRange = NSRange(location: 0, length: attributed.length)
+        let pasteboardItem = NSPasteboardItem()
 
         if let rtfData = try? attributed.data(
             from: fullRange,
             documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
         ) {
-            pasteboard.setData(rtfData, forType: .rtf)
+            pasteboardItem.setData(rtfData, forType: .rtf)
         }
 
         if let exportedHTMLData = try? attributed.data(
             from: fullRange,
             documentAttributes: [.documentType: NSAttributedString.DocumentType.html]
         ) {
-            pasteboard.setData(exportedHTMLData, forType: .html)
+            pasteboardItem.setData(exportedHTMLData, forType: .html)
         }
 
-        pasteboard.setString(attributed.string, forType: .string)
+        pasteboardItem.setString(attributed.string, forType: .string)
+        pasteboard.writeObjects([pasteboardItem])
 
         LogStore.shared.log("Copied document as Rich Text", level: .debug, category: "ui")
     }

@@ -285,7 +285,14 @@ struct MarkdownWebView: NSViewRepresentable {
                 const CURRENT_CLASS = "markdown-find-current";
 
                 function escapeRegex(value) {
-                    return value.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");
+                    const specials = new Set([".", "*", "+", "?", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\\\"]);
+                    return Array.from(value, (character) => specials.has(character) ? "\\\\" + character : character).join("");
+                }
+
+                function postHitCount(count) {
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.searchHitCount) {
+                        window.webkit.messageHandlers.searchHitCount.postMessage(count);
+                    }
                 }
 
                 function clearHighlights() {
@@ -327,6 +334,7 @@ struct MarkdownWebView: NSViewRepresentable {
                 function applyHighlights(query, caseSensitive, selectedIndex) {
                     clearHighlights();
                     if (!query) {
+                        postHitCount(0);
                         return 0;
                     }
                     const flags = caseSensitive ? "g" : "gi";
@@ -369,9 +377,7 @@ struct MarkdownWebView: NSViewRepresentable {
                     if (count > 0) {
                         setSelected(selectedIndex);
                     }
-                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.searchHitCount) {
-                        window.webkit.messageHandlers.searchHitCount.postMessage(count);
-                    }
+                    postHitCount(count);
                     return count;
                 }
 

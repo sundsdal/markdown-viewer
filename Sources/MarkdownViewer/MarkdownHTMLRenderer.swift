@@ -529,13 +529,15 @@ enum MarkdownHTMLRenderer {
     private static func highlightYAML(_ code: String) -> String {
         var result: [String] = []
         for line in code.components(separatedBy: "\n") {
-            var highlighted = line
-            if let range = highlighted.range(of: #"(#.*)$"#, options: .regularExpression) {
-                let comment = highlighted[range]
-                highlighted = highlighted.replacingCharacters(in: range, with: "<span class=\"sy-comment\">\(comment)</span>")
-                result.append(highlighted)
-                continue
+            var contentPart = line
+            var commentPart = ""
+
+            if let range = line.range(of: #"(#.*)$"#, options: .regularExpression) {
+                commentPart = "<span class=\"sy-comment\">\(line[range])</span>"
+                contentPart = String(line[..<range.lowerBound])
             }
+
+            var highlighted = contentPart
             if let range = highlighted.range(of: #"^(\s*)([\w\-./&quot;@][^:]*?)(:)"#, options: .regularExpression) {
                 let match = String(highlighted[range])
                 let replaced = match.replacingOccurrences(
@@ -554,7 +556,7 @@ enum MarkdownHTMLRenderer {
             highlighted = highlighted.replacingOccurrences(
                 of: #"(?<=:\s)(\d+\.?\d*)\b"#,
                 with: "<span class=\"sy-number\">$1</span>", options: .regularExpression)
-            result.append(highlighted)
+            result.append(highlighted + commentPart)
         }
         return result.joined(separator: "\n")
     }
@@ -644,6 +646,10 @@ enum MarkdownHTMLRenderer {
             if kw.hasPrefix("@") {
                 result = result.replacingOccurrences(
                     of: "(\(NSRegularExpression.escapedPattern(for: kw)))\\b",
+                    with: "<span class=\"sy-keyword\">$1</span>", options: .regularExpression)
+            } else if kw == "class" {
+                result = result.replacingOccurrences(
+                    of: "\\b(\(NSRegularExpression.escapedPattern(for: kw)))\\b(?!\\s*=)",
                     with: "<span class=\"sy-keyword\">$1</span>", options: .regularExpression)
             } else {
                 result = result.replacingOccurrences(
