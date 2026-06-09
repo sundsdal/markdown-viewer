@@ -99,6 +99,15 @@ final class AutoReloadingMarkdownDocument: ObservableObject {
         reloadWorkItem?.cancel()
     }
 
+    func reload() {
+        guard fileURL != nil else {
+            return
+        }
+        queue.async { [weak self] in
+            self?.reloadFromDisk(forceUpdate: true)
+        }
+    }
+
     private func installFileWatcher(for fileURL: URL) {
         fileSource?.cancel()
         fileSource = nil
@@ -168,7 +177,7 @@ final class AutoReloadingMarkdownDocument: ObservableObject {
         queue.asyncAfter(deadline: .now() + 0.15, execute: workItem)
     }
 
-    private func reloadFromDisk() {
+    private func reloadFromDisk(forceUpdate: Bool = false) {
         guard let fileURL else {
             return
         }
@@ -178,8 +187,10 @@ final class AutoReloadingMarkdownDocument: ObservableObject {
             let contentType = Self.contentType(for: fileURL)
             let loadedDocument = try MarkdownDocument(data: data, contentType: contentType)
 
-            guard loadedDocument.text != lastLoadedDocument.text ||
-                    loadedDocument.fileType != lastLoadedDocument.fileType else {
+            let textChanged = loadedDocument.text != lastLoadedDocument.text
+                || loadedDocument.fileType != lastLoadedDocument.fileType
+
+            guard textChanged || forceUpdate else {
                 return
             }
 
@@ -188,7 +199,8 @@ final class AutoReloadingMarkdownDocument: ObservableObject {
 
             DispatchQueue.main.async { [weak self] in
                 self?.document = loadedDocument
-                LogStore.shared.log("Reloaded \(fileURL.lastPathComponent) after external change", level: .debug, category: "file")
+                let reason = forceUpdate && !textChanged ? "manual reload (no changes)" : (forceUpdate ? "manual reload" : "external change")
+                LogStore.shared.log("Reloaded \(fileURL.lastPathComponent) — \(reason)", level: .debug, category: "file")
             }
         } catch {
             DispatchQueue.main.async {
