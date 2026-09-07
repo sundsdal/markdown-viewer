@@ -1,8 +1,11 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 struct MarkdownWebView: NSViewRepresentable {
+    private static let resourceScheme = "markdown-resource"
     let markdown: String
+    let sourceFileURL: URL?
     let fontSize: Double
     let theme: MarkdownTheme
     let scrollPosition: RendererScrollPosition
@@ -19,6 +22,7 @@ struct MarkdownWebView: NSViewRepresentable {
         config.suppressesIncrementalRendering = true
         config.userContentController.add(context.coordinator, name: "scrollPosition")
         config.userContentController.add(context.coordinator, name: "searchHitCount")
+        config.setURLSchemeHandler(context.coordinator, forURLScheme: Self.resourceScheme)
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -39,7 +43,7 @@ struct MarkdownWebView: NSViewRepresentable {
             context.coordinator.loadedDocumentSignature = signature
             context.coordinator.lastTheme = theme
             context.coordinator.invalidateSearchHighlightCache()
-            webView.loadHTMLString(buildFullHTML(markdown: markdown, fontSize: fontSize, theme: theme), baseURL: nil)
+            loadHTML(in: webView, context: context)
         } else {
             context.coordinator.applyThemeIfNeeded(theme)
             context.coordinator.applySearchIfNeeded(
@@ -63,11 +67,12 @@ struct MarkdownWebView: NSViewRepresentable {
             searchQuery: searchQuery,
             searchIsCaseSensitive: searchIsCaseSensitive,
             selectedSearchHitIndex: selectedSearchHitIndex,
-            onSearchHitCountChange: onSearchHitCountChange
+            onSearchHitCountChange: onSearchHitCountChange,
+            documentURL: sourceFileURL
         )
     }
 
-    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKURLSchemeHandler {
         weak var webView: WKWebView?
         var scrollPosition: RendererScrollPosition
         var source: String
@@ -85,6 +90,8 @@ struct MarkdownWebView: NSViewRepresentable {
         private var appliedSelectedSearchHitIndex: Int?
         private var hasFinishedInitialLoad = false
         private var lastReportedHitCount = -1
+        private let documentURL: URL?
+        private var activeSchemeTaskIDs = Set<ObjectIdentifier>()
 
         init(
             scrollPosition: RendererScrollPosition,
@@ -93,7 +100,8 @@ struct MarkdownWebView: NSViewRepresentable {
             searchQuery: String,
             searchIsCaseSensitive: Bool,
             selectedSearchHitIndex: Int,
-            onSearchHitCountChange: @escaping (Int) -> Void
+            onSearchHitCountChange: @escaping (Int) -> Void,
+            documentURL: URL?
         ) {
             self.scrollPosition = scrollPosition
             self.source = source
@@ -102,6 +110,7 @@ struct MarkdownWebView: NSViewRepresentable {
             self.pendingSearchIsCaseSensitive = searchIsCaseSensitive
             self.pendingSelectedSearchHitIndex = selectedSearchHitIndex
             self.onSearchHitCountChange = onSearchHitCountChange
+            self.documentURL = documentURL?.resolvingSymlinksInPath()
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -115,6 +124,108 @@ struct MarkdownWebView: NSViewRepresentable {
                 isCaseSensitive: pendingSearchIsCaseSensitive,
                 selectedIndex: pendingSelectedSearchHitIndex
             )
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.cancel)
+                return
+            }
+
+            if url.scheme == MarkdownWebView.resourceScheme,
+               resourceURL(for: url) == documentURL,
+               (navigationAction.navigationType != .linkActivated || url.fragment != nil) {
+                decisionHandler(.allow)
+                return
+            }
+
+            guard navigationAction.navigationType == .linkActivated else {
+                // `loadHTMLString` starts from about:blank. All other automatic
+                // navigations, including script redirects, must remain blocked.
+                decisionHandler(url.absoluteString == "about:blank" ? .allow : .cancel)
+                return
+            }
+
+            if url.scheme == "about", url.absoluteString.hasPrefix("about:blank#") {
+                decisionHandler(.allow)
+                return
+            }
+
+            if url.scheme == MarkdownWebView.resourceScheme,
+               let fileURL = resourceURL(for: url),
+               MarkdownWebView.isMarkdownDocument(fileURL) {
+                NSWorkspace.shared.open(fileURL)
+            } else if let scheme = url.scheme?.lowercased(),
+                      ["http", "https", "mailto"].contains(scheme) {
+                NSWorkspace.shared.open(url)
+            } else if url.isFileURL,
+                      MarkdownWebView.isMarkdownDocument(url) {
+                NSWorkspace.shared.open(url)
+            }
+
+            decisionHandler(.cancel)
+        }
+
+        func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+            let taskID = ObjectIdentifier(urlSchemeTask as AnyObject)
+            activeSchemeTaskIDs.insert(taskID)
+            loadResource(for: urlSchemeTask, id: taskID)
+        }
+
+        private func loadResource(for urlSchemeTask: WKURLSchemeTask, id taskID: ObjectIdentifier) {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self,
+                      let url = urlSchemeTask.request.url,
+                      let fileURL = self.resourceURL(for: url) else {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.finish(urlSchemeTask, id: taskID, error: URLError(.fileDoesNotExist))
+                    }
+                    return
+                }
+
+                do {
+                    let data = try Data(contentsOf: fileURL)
+                    let mimeType = UTType(filenameExtension: fileURL.pathExtension)?.preferredMIMEType
+                        ?? "application/octet-stream"
+                    DispatchQueue.main.async { [weak self] in
+                        self?.finish(urlSchemeTask, id: taskID, data: data, mimeType: mimeType)
+                    }
+                } catch {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.finish(urlSchemeTask, id: taskID, error: error)
+                    }
+                }
+            }
+        }
+
+        func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+            activeSchemeTaskIDs.remove(ObjectIdentifier(urlSchemeTask as AnyObject))
+        }
+
+        private func resourceURL(for url: URL) -> URL? {
+            guard url.scheme == MarkdownWebView.resourceScheme,
+                  url.host == "document",
+                  url.path.hasPrefix("/") else {
+                return nil
+            }
+            return URL(fileURLWithPath: url.path).resolvingSymlinksInPath()
+        }
+
+        private func finish(_ task: WKURLSchemeTask, id: ObjectIdentifier, data: Data, mimeType: String) {
+            guard activeSchemeTaskIDs.remove(id) != nil,
+                  let url = task.request.url else { return }
+            task.didReceive(URLResponse(url: url, mimeType: mimeType, expectedContentLength: data.count, textEncodingName: nil))
+            task.didReceive(data)
+            task.didFinish()
+        }
+
+        private func finish(_ task: WKURLSchemeTask, id: ObjectIdentifier, error: Error) {
+            guard activeSchemeTaskIDs.remove(id) != nil else { return }
+            task.didFailWithError(error)
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -238,11 +349,24 @@ struct MarkdownWebView: NSViewRepresentable {
         context.coordinator.loadedDocumentSignature = documentSignature(markdown: markdown, fontSize: fontSize)
         context.coordinator.lastApplyToken = scrollApplyToken
         context.coordinator.lastTheme = theme
-        webView.loadHTMLString(html, baseURL: nil)
+        let baseURL = sourceFileURL.flatMap(Self.virtualDocumentURL)
+        webView.loadHTMLString(html, baseURL: baseURL)
     }
 
     private func documentSignature(markdown: String, fontSize: Double) -> String {
         "\(fontSize)\u{0}\(markdown)"
+    }
+
+    private static func isMarkdownDocument(_ url: URL) -> Bool {
+        ["md", "markdown", "mdown", "mkdn", "mdx"].contains(url.pathExtension.lowercased())
+    }
+
+    private static func virtualDocumentURL(for fileURL: URL) -> URL? {
+        var components = URLComponents()
+        components.scheme = resourceScheme
+        components.host = "document"
+        components.path = fileURL.resolvingSymlinksInPath().path
+        return components.url
     }
 
     // MARK: - Full HTML document
