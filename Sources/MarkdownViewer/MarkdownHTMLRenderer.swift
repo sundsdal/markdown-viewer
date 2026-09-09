@@ -526,14 +526,19 @@ enum MarkdownHTMLRenderer {
             let destination = String(result[destinationRange])
             let replacement: String
             if isPermittedDestination(destination, isImage: isImage) {
+                let resolvedDestination = normalizeNetworkPathDestination(destination)
                 replacement = isImage
-                    ? "<img src=\"\(destination)\" alt=\"\(label)\">"
-                    : "<a href=\"\(destination)\">\(label)</a>"
+                    ? "<img src=\"\(resolvedDestination)\" alt=\"\(label)\">"
+                    : "<a href=\"\(resolvedDestination)\">\(label)</a>"
             } else {
                 replacement = label
             }
             return result.replacingCharacters(in: wholeRange, with: replacement)
         }
+    }
+
+    private static func normalizeNetworkPathDestination(_ destination: String) -> String {
+        destination.hasPrefix("//") ? "https:\(destination)" : destination
     }
 
     private static func isPermittedDestination(_ destination: String, isImage: Bool) -> Bool {
