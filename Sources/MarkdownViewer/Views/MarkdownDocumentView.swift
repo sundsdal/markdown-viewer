@@ -10,6 +10,7 @@ struct MarkdownDocumentView: View {
     @SceneStorage("rendererModeLeft")  private var leftRaw:  String = ""
     @SceneStorage("rendererModeRight") private var rightRaw: String = ""
     @StateObject private var autoReloadingDocument: AutoReloadingMarkdownDocument
+    private let sourceFileURL: URL?
     @StateObject private var scrollPosition = RendererScrollPosition()
     @State private var isShowingSearch = false
     @State private var searchQuery = ""
@@ -19,6 +20,7 @@ struct MarkdownDocumentView: View {
     @FocusState private var searchFieldIsFocused: Bool
 
     init(document: MarkdownDocument, fileURL: URL? = nil) {
+        sourceFileURL = fileURL
         _autoReloadingDocument = StateObject(
             wrappedValue: AutoReloadingMarkdownDocument(document: document, fileURL: fileURL)
         )
@@ -284,6 +286,7 @@ struct MarkdownDocumentView: View {
         case .html:
             MarkdownWebView(
                 markdown: renderableText,
+                sourceFileURL: sourceFileURL,
                 fontSize: fontSize,
                 theme: selectedTheme,
                 scrollPosition: scrollPosition,

@@ -355,7 +355,8 @@ enum MarkdownHTMLRenderer {
                         i += 1
                     } else { break }
                 }
-                html.append("<blockquote>\(inlineMarkdown(quoteLines.joined(separator: "<br>")))</blockquote>")
+                let renderedQuote = quoteLines.map(inlineMarkdown).joined(separator: "<br>")
+                html.append("<blockquote>\(renderedQuote)</blockquote>")
                 continue
             }
 
@@ -484,10 +485,16 @@ enum MarkdownHTMLRenderer {
 
     private static func inlineMarkdown(_ text: String) -> String {
         var result = escapeHTML(text)
-        result = result.replacingOccurrences(
-            of: #"!\[([^\]]*)\]\(([^)]+)\)"#, with: "<img src=\"$2\" alt=\"$1\">", options: .regularExpression)
-        result = result.replacingOccurrences(
-            of: #"\[([^\]]+)\]\(([^)]+)\)"#, with: "<a href=\"$2\">$1</a>", options: .regularExpression)
+        result = replaceMarkdownDestinations(
+            in: result,
+            pattern: #"!\[([^\]]*)\]\(([^)]+)\)"#,
+            isImage: true
+        )
+        result = replaceMarkdownDestinations(
+            in: result,
+            pattern: #"\[([^\]]+)\]\(([^)]+)\)"#,
+            isImage: false
+        )
         result = result.replacingOccurrences(
             of: #"\*\*\*(.+?)\*\*\*"#, with: "<strong><em>$1</em></strong>", options: .regularExpression)
         result = result.replacingOccurrences(
@@ -501,6 +508,98 @@ enum MarkdownHTMLRenderer {
         result = result.replacingOccurrences(
             of: #"`([^`]+)`"#, with: "<code>$1</code>", options: .regularExpression)
         return result
+    }
+
+    private static func replaceMarkdownDestinations(in text: String, pattern: String, isImage: Bool) -> String {
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return text }
+        let range = NSRange(text.startIndex..., in: text)
+        let matches = expression.matches(in: text, range: range)
+
+        return matches.reversed().reduce(text) { result, match in
+            guard
+                let wholeRange = Range(match.range, in: result),
+                let labelRange = Range(match.range(at: 1), in: result),
+                let destinationRange = Range(match.range(at: 2), in: result)
+            else { return result }
+
+            let label = String(result[labelRange])
+            let destination = String(result[destinationRange])
+            let replacement: String
+            if isPermittedDestination(destination, isImage: isImage) {
+                let resolvedDestination = normalizeNetworkPathDestination(destination)
+                replacement = isImage
+                    ? "<img src=\"\(resolvedDestination)\" alt=\"\(label)\">"
+                    : "<a href=\"\(resolvedDestination)\">\(label)</a>"
+            } else {
+                replacement = label
+            }
+            return result.replacingCharacters(in: wholeRange, with: replacement)
+        }
+    }
+
+    private static func normalizeNetworkPathDestination(_ destination: String) -> String {
+        destination.hasPrefix("//") ? "https:\(destination)" : destination
+    }
+
+    private static func isPermittedDestination(_ destination: String, isImage: Bool) -> Bool {
+        let normalized = normalizedDestination(destination)
+        guard let colonIndex = normalized.firstIndex(of: ":") else { return true }
+
+        let prefix = normalized[..<colonIndex]
+        guard !prefix.contains("/"), !prefix.contains("?"), !prefix.contains("#") else { return true }
+        guard prefix.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*$"#, options: .regularExpression) != nil else {
+            return true
+        }
+
+        switch prefix.lowercased() {
+        case "http", "https":
+            return true
+        case "mailto":
+            return !isImage
+        default:
+            return false
+        }
+    }
+
+    private static func normalizedDestination(_ destination: String) -> String {
+        var value = destination
+        for _ in 0..<4 {
+            let decoded = decodeHTMLCharacterReferences(in: value)
+            if decoded == value { break }
+            value = decoded
+        }
+
+        let ignored = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+        return String(String.UnicodeScalarView(value.unicodeScalars.filter { !ignored.contains($0) }))
+    }
+
+    private static func decodeHTMLCharacterReferences(in text: String) -> String {
+        var result = text
+        let namedReferences = [
+            "&amp;": "&", "&quot;": "\"", "&#39;": "'", "&lt;": "<", "&gt;": ">",
+            "&colon;": ":", "&Tab;": "\t", "&NewLine;": "\n"
+        ]
+        for (reference, character) in namedReferences {
+            result = result.replacingOccurrences(of: reference, with: character, options: [.caseInsensitive])
+        }
+
+        guard let expression = try? NSRegularExpression(pattern: #"&#(x[0-9A-Fa-f]+|[0-9]+);"#) else {
+            return result
+        }
+        let range = NSRange(result.startIndex..., in: result)
+        return expression.matches(in: result, range: range).reversed().reduce(result) { value, match in
+            guard
+                let wholeRange = Range(match.range, in: value),
+                let scalarRange = Range(match.range(at: 1), in: value)
+            else { return value }
+            let scalarText = value[scalarRange]
+            let radix = scalarText.first?.lowercased() == "x" ? 16 : 10
+            let digits = radix == 16 ? scalarText.dropFirst() : Substring(scalarText)
+            guard let scalarValue = UInt32(digits, radix: radix), let scalar = UnicodeScalar(scalarValue) else {
+                return value
+            }
+            return value.replacingCharacters(in: wholeRange, with: String(scalar))
+        }
     }
 
     private static func escapeHTML(_ text: String) -> String {
