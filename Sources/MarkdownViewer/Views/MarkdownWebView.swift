@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
+import Darwin
 
 struct MarkdownWebView: NSViewRepresentable {
     private static let resourceScheme = "markdown-resource"
@@ -91,7 +92,33 @@ struct MarkdownWebView: NSViewRepresentable {
         private var hasFinishedInitialLoad = false
         private var lastReportedHitCount = -1
         private let documentURL: URL?
-        private var activeSchemeTaskIDs = Set<ObjectIdentifier>()
+        private var activeSchemeTasks = [ObjectIdentifier: ResourceCancellationToken]()
+
+        private static let maximumResourceSize = 32 * 1024 * 1024
+        private static let resourceReadChunkSize = 64 * 1024
+
+        private final class ResourceCancellationToken: @unchecked Sendable {
+            private let lock = NSLock()
+            private var isCancelled = false
+
+            func cancel() {
+                lock.lock()
+                isCancelled = true
+                lock.unlock()
+            }
+
+            var cancelled: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return isCancelled
+            }
+        }
+
+        private enum ResourceReadError: Error {
+            case notRegularFile
+            case tooLarge
+            case cancelled
+        }
 
         init(
             scrollPosition: RendererScrollPosition,
@@ -172,38 +199,44 @@ struct MarkdownWebView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
             let taskID = ObjectIdentifier(urlSchemeTask as AnyObject)
-            activeSchemeTaskIDs.insert(taskID)
-            loadResource(for: urlSchemeTask, id: taskID)
+            let cancellationToken = ResourceCancellationToken()
+            activeSchemeTasks[taskID] = cancellationToken
+            loadResource(for: urlSchemeTask, id: taskID, cancellationToken: cancellationToken)
         }
 
-        private func loadResource(for urlSchemeTask: WKURLSchemeTask, id taskID: ObjectIdentifier) {
+        private func loadResource(
+            for urlSchemeTask: WKURLSchemeTask,
+            id taskID: ObjectIdentifier,
+            cancellationToken: ResourceCancellationToken
+        ) {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self,
                       let url = urlSchemeTask.request.url,
                       let fileURL = self.resourceURL(for: url) else {
                     DispatchQueue.main.async { [weak self] in
-                        self?.finish(urlSchemeTask, id: taskID, error: URLError(.fileDoesNotExist))
+                        self?.finish(urlSchemeTask, id: taskID, cancellationToken: cancellationToken, error: URLError(.fileDoesNotExist))
                     }
                     return
                 }
 
                 do {
-                    let data = try Data(contentsOf: fileURL)
+                    let data = try Self.readResource(at: fileURL, cancellationToken: cancellationToken)
                     let mimeType = UTType(filenameExtension: fileURL.pathExtension)?.preferredMIMEType
                         ?? "application/octet-stream"
                     DispatchQueue.main.async { [weak self] in
-                        self?.finish(urlSchemeTask, id: taskID, data: data, mimeType: mimeType)
+                        self?.finish(urlSchemeTask, id: taskID, cancellationToken: cancellationToken, data: data, mimeType: mimeType)
                     }
                 } catch {
                     DispatchQueue.main.async { [weak self] in
-                        self?.finish(urlSchemeTask, id: taskID, error: error)
+                        self?.finish(urlSchemeTask, id: taskID, cancellationToken: cancellationToken, error: error)
                     }
                 }
             }
         }
 
         func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-            activeSchemeTaskIDs.remove(ObjectIdentifier(urlSchemeTask as AnyObject))
+            let taskID = ObjectIdentifier(urlSchemeTask as AnyObject)
+            activeSchemeTasks.removeValue(forKey: taskID)?.cancel()
         }
 
         private func resourceURL(for url: URL) -> URL? {
@@ -215,17 +248,81 @@ struct MarkdownWebView: NSViewRepresentable {
             return URL(fileURLWithPath: url.path).resolvingSymlinksInPath()
         }
 
-        private func finish(_ task: WKURLSchemeTask, id: ObjectIdentifier, data: Data, mimeType: String) {
-            guard activeSchemeTaskIDs.remove(id) != nil,
+        private func finish(
+            _ task: WKURLSchemeTask,
+            id: ObjectIdentifier,
+            cancellationToken: ResourceCancellationToken,
+            data: Data,
+            mimeType: String
+        ) {
+            guard activeSchemeTasks.removeValue(forKey: id) === cancellationToken,
+                  !cancellationToken.cancelled,
                   let url = task.request.url else { return }
             task.didReceive(URLResponse(url: url, mimeType: mimeType, expectedContentLength: data.count, textEncodingName: nil))
             task.didReceive(data)
             task.didFinish()
         }
 
-        private func finish(_ task: WKURLSchemeTask, id: ObjectIdentifier, error: Error) {
-            guard activeSchemeTaskIDs.remove(id) != nil else { return }
+        private func finish(
+            _ task: WKURLSchemeTask,
+            id: ObjectIdentifier,
+            cancellationToken: ResourceCancellationToken,
+            error: Error
+        ) {
+            guard activeSchemeTasks.removeValue(forKey: id) === cancellationToken,
+                  !cancellationToken.cancelled else { return }
             task.didFailWithError(error)
+        }
+
+        private static func readResource(
+            at fileURL: URL,
+            cancellationToken: ResourceCancellationToken
+        ) throws -> Data {
+            guard !cancellationToken.cancelled else {
+                throw ResourceReadError.cancelled
+            }
+            let fileDescriptor = Darwin.open(fileURL.path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+            guard fileDescriptor >= 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            defer { Darwin.close(fileDescriptor) }
+
+            var fileStatus = stat()
+            guard Darwin.fstat(fileDescriptor, &fileStatus) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            guard (fileStatus.st_mode & S_IFMT) == S_IFREG else {
+                throw ResourceReadError.notRegularFile
+            }
+            guard fileStatus.st_size >= 0,
+                  fileStatus.st_size <= off_t(maximumResourceSize) else {
+                throw ResourceReadError.tooLarge
+            }
+            guard !cancellationToken.cancelled else {
+                throw ResourceReadError.cancelled
+            }
+
+            var data = Data()
+            data.reserveCapacity(Int(fileStatus.st_size))
+            var buffer = [UInt8](repeating: 0, count: resourceReadChunkSize)
+            while true {
+                guard !cancellationToken.cancelled else {
+                    throw ResourceReadError.cancelled
+                }
+                let bytesRead = buffer.withUnsafeMutableBytes { buffer in
+                    Darwin.read(fileDescriptor, buffer.baseAddress, buffer.count)
+                }
+                if bytesRead == 0 { return data }
+                if bytesRead < 0 {
+                    let readError = errno
+                    if readError == EINTR { continue }
+                    throw POSIXError(POSIXErrorCode(rawValue: readError) ?? .EIO)
+                }
+                guard data.count <= maximumResourceSize - bytesRead else {
+                    throw ResourceReadError.tooLarge
+                }
+                data.append(contentsOf: buffer.prefix(bytesRead))
+            }
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
