@@ -18,7 +18,7 @@ struct MarkdownDocument: FileDocument {
         case plainText
     }
 
-    static var readableContentTypes: [UTType] = [.markdown, .json, .yaml, .plainText]
+    static let readableContentTypes: [UTType] = [.markdown, .json, .yaml, .plainText]
 
     var text: String
     var fileType: FileType
@@ -68,7 +68,10 @@ struct MarkdownDocument: FileDocument {
     }
 }
 
-final class AutoReloadingMarkdownDocument: ObservableObject {
+// File-watcher state is confined to `queue`; published `document` updates are
+// dispatched to the main queue. Work items capture weakly, so no operation retains
+// this object through teardown.
+final class AutoReloadingMarkdownDocument: ObservableObject, @unchecked Sendable {
     @Published private(set) var document: MarkdownDocument
 
     private let fileURL: URL?

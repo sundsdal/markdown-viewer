@@ -1,6 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
-import WebKit
+@preconcurrency import WebKit
 import Darwin
 
 struct MarkdownWebView: NSViewRepresentable {
@@ -24,6 +24,7 @@ struct MarkdownWebView: NSViewRepresentable {
         config.userContentController.add(context.coordinator, name: "scrollPosition")
         config.userContentController.add(context.coordinator, name: "searchHitCount")
         config.setURLSchemeHandler(context.coordinator, forURLScheme: Self.resourceScheme)
+        config.userContentController.add(context.coordinator, name: "mermaidRendered")
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -344,6 +345,16 @@ struct MarkdownWebView: NSViewRepresentable {
                     lastReportedHitCount = count
                     onSearchHitCountChange(count)
                 }
+            case "mermaidRendered":
+                // Mermaid replaces source with SVG asynchronously, which can change
+                // the scroll range after navigation and after a theme update.
+                applyScrollPositionIfNeeded()
+                appliedSearchQuery = nil
+                applySearchIfNeeded(
+                    query: pendingSearchQuery,
+                    isCaseSensitive: pendingSearchIsCaseSensitive,
+                    selectedIndex: pendingSelectedSearchHitIndex
+                )
             default:
                 break
             }
@@ -381,6 +392,7 @@ struct MarkdownWebView: NSViewRepresentable {
                 (document.head || document.documentElement).prepend(style);
               }
               style.textContent = '\(theme.escapedCSSVariableRuleForJavaScript)';
+              window.__markdownRenderMermaid && window.__markdownRenderMermaid();
             })();
             """
             webView.evaluateJavaScript(script)
@@ -466,6 +478,18 @@ struct MarkdownWebView: NSViewRepresentable {
         return components.url
     }
 
+    private static let mermaidRuntime: String = {
+        guard let url = Bundle.main.url(forResource: "mermaid.min", withExtension: "js"),
+              let runtime = try? String(contentsOf: url, encoding: .utf8) else {
+            assertionFailure("Missing bundled Mermaid runtime")
+            return ""
+        }
+
+        // Avoid allowing an unexpected literal closing script tag in a third-party
+        // asset to terminate the script element that contains it.
+        return runtime.replacingOccurrences(of: "</script", with: "<\\/script", options: .caseInsensitive)
+    }()
+
     // MARK: - Full HTML document
 
     private func buildFullHTML(markdown: String, fontSize: Double, theme: MarkdownTheme) -> String {
@@ -499,6 +523,7 @@ struct MarkdownWebView: NSViewRepresentable {
                 }, { passive: true });
 
                 window.addEventListener("load", reportScrollPosition);
+                window.__markdownContentDidResize = reportScrollPosition;
             })();
 
             window.__markdownFind = (() => {
@@ -538,7 +563,7 @@ struct MarkdownWebView: NSViewRepresentable {
                             const parent = node.parentNode;
                             if (!parent) return NodeFilter.FILTER_REJECT;
                             const tag = parent.nodeName;
-                            if (tag === "SCRIPT" || tag === "STYLE" || tag === "MARK") {
+                            if (tag === "SCRIPT" || tag === "STYLE" || tag === "MARK" || parent.closest(".mermaid")) {
                                 return NodeFilter.FILTER_REJECT;
                             }
                             return NodeFilter.FILTER_ACCEPT;
@@ -619,6 +644,86 @@ struct MarkdownWebView: NSViewRepresentable {
                 return { applyHighlights, setSelected, clearHighlights };
             })();
         </script>
+        \(body.contains("class=\"mermaid\"") ? "<script>\n\(Self.mermaidRuntime)\n</script>" : "")
+        <script>
+            (() => {
+                function sourceFor(node) {
+                    return node.dataset.mermaidSource || node.textContent || "";
+                }
+
+                function resolvedColor(name, fallback) {
+                    const probe = document.createElement("span");
+                    probe.style.color = "var(" + name + ", " + fallback + ")";
+                    probe.style.display = "none";
+                    document.body.appendChild(probe);
+                    const value = getComputedStyle(probe).color || fallback;
+                    probe.remove();
+                    return value;
+                }
+
+                function themeVariables() {
+                    const value = resolvedColor;
+                    return {
+                        background: value("--md-bg", "#ffffff"),
+                        primaryColor: value("--md-code-bg", "#f0f0f3"),
+                        primaryTextColor: value("--md-fg", "#222222"),
+                        primaryBorderColor: value("--md-border", "#aaaaaa"),
+                        lineColor: value("--md-secondary", "#555555"),
+                        textColor: value("--md-fg", "#222222")
+                    };
+                }
+
+                async function renderMermaidNow() {
+                    const diagrams = Array.from(document.querySelectorAll(".mermaid"));
+                    if (!diagrams.length || !window.mermaid) return;
+
+                    window.mermaid.initialize({
+                        startOnLoad: false,
+                        securityLevel: "strict",
+                        suppressErrorRendering: true,
+                        theme: "base",
+                        themeVariables: { ...themeVariables(), fontSize: "\(fontSize)px" },
+                        flowchart: { useMaxWidth: false }
+                    });
+
+                    for (const diagram of diagrams) {
+                        const source = sourceFor(diagram);
+                        diagram.textContent = source;
+                        diagram.removeAttribute("data-processed");
+                        try {
+                            await window.mermaid.run({ nodes: [diagram] });
+                        } catch (error) {
+                            diagram.classList.remove("mermaid");
+                            diagram.classList.add("mermaid-error");
+                            diagram.replaceChildren();
+                            const code = document.createElement("code");
+                            code.textContent = source;
+                            diagram.appendChild(code);
+                            console.error("Mermaid diagram could not be rendered", error);
+                        }
+                    }
+
+                    window.__markdownContentDidResize && window.__markdownContentDidResize();
+                    if (window.webkit?.messageHandlers?.mermaidRendered) {
+                        window.webkit.messageHandlers.mermaidRendered.postMessage({});
+                    }
+                }
+
+                let renderChain = Promise.resolve();
+                function renderMermaid() {
+                    renderChain = renderChain.then(renderMermaidNow, renderMermaidNow);
+                    return renderChain;
+                }
+
+                window.__markdownRenderMermaid = renderMermaid;
+                window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderMermaid);
+                if (document.readyState === "loading") {
+                    document.addEventListener("DOMContentLoaded", renderMermaid, { once: true });
+                } else {
+                    renderMermaid();
+                }
+            })();
+        </script>
         <style id="__markdown_theme_variables__">
         \(theme.cssVariableRule)
         </style>
@@ -660,6 +765,23 @@ struct MarkdownWebView: NSViewRepresentable {
                 background: none;
                 color: inherit;
                 padding: 0;
+            }
+            pre.mermaid {
+                box-sizing: border-box;
+                padding: 16px;
+                overflow-x: auto;
+                text-align: center;
+            }
+            .mermaid svg {
+                display: block;
+                height: auto;
+                max-width: none;
+                margin: 0 auto;
+            }
+            pre.mermaid-error {
+                border-color: #c94040;
+                color: var(--md-fg);
+                white-space: pre-wrap;
             }
             blockquote {
                 border-left: 3px solid var(--md-border);

@@ -40,8 +40,9 @@ close(descriptor)
 let symlink = directory.appendingPathComponent("device.png")
 try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: URL(fileURLWithPath: "/dev/zero"))
 
+let scrollPosition = MainActor.assumeIsolated { RendererScrollPosition() }
 let view = MarkdownWebView(markdown: "", sourceFileURL: regular, fontSize: 16, theme: .light,
-    scrollPosition: RendererScrollPosition(), scrollApplyToken: UUID(), source: "test", synchronizesScroll: false,
+    scrollPosition: scrollPosition, scrollApplyToken: UUID(), source: "test", synchronizesScroll: false,
     searchQuery: "", searchIsCaseSensitive: false, selectedSearchHitIndex: 0, onSearchHitCountChange: { _ in })
 let coordinator = view.makeCoordinator()
 let configuration = WKWebViewConfiguration()

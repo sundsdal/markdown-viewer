@@ -302,8 +302,7 @@ enum MarkdownHTMLRenderer {
             if line.hasPrefix("```") {
                 if inCodeBlock {
                     let code = codeLines.joined(separator: "\n")
-                    let highlighted = highlightCode(code, language: codeLanguage)
-                    html.append("<pre><code>\(highlighted)</code></pre>")
+                    html.append(renderCodeBlock(code, language: codeLanguage))
                     codeLines = []
                     inCodeBlock = false
                     codeLanguage = ""
@@ -400,7 +399,7 @@ enum MarkdownHTMLRenderer {
 
         if inCodeBlock {
             let code = codeLines.joined(separator: "\n")
-            html.append("<pre><code>\(highlightCode(code, language: codeLanguage))</code></pre>")
+            html.append(renderCodeBlock(code, language: codeLanguage))
         }
         closeList(&html, &inList, &listType)
 
@@ -481,6 +480,28 @@ enum MarkdownHTMLRenderer {
         trimmed.allSatisfy({ $0 == "-" || $0 == "*" || $0 == "_" || $0 == " " })
             && trimmed.filter({ $0 != " " }).count >= 3
             && Set(trimmed.filter({ $0 != " " })).count == 1
+    }
+
+    private static func renderCodeBlock(_ code: String, language: String) -> String {
+        guard isMermaidFlowchart(code, language: language) else {
+            return "<pre><code>\(highlightCode(code, language: language))</code></pre>"
+        }
+
+        // Keep the original source in an attribute so the WebView can restore it if
+        // Mermaid reports a syntax error. Escaping is deliberately done before it
+        // reaches either HTML or JavaScript.
+        let escapedCode = escapeHTML(code)
+        return "<pre class=\"mermaid\" data-mermaid-source=\"\(escapedCode)\"><code>\(escapedCode)</code></pre>"
+    }
+
+    private static func isMermaidFlowchart(_ code: String, language: String) -> Bool {
+        if language == "mermaid" { return true }
+
+        // Support the common unlabeled form without converting ordinary code blocks.
+        guard language.isEmpty else { return false }
+        guard let firstContentLine = code.split(whereSeparator: \.isNewline).first else { return false }
+        let directive = firstContentLine.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return directive.hasPrefix("flowchart ") || directive.hasPrefix("graph ")
     }
 
     private static func inlineMarkdown(_ text: String) -> String {
