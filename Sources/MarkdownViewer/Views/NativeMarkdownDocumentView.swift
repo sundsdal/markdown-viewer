@@ -1,6 +1,7 @@
 import SwiftUI
 import MarkdownUI
 
+@MainActor
 struct NativeMarkdownDocumentView: View {
     let document: MarkdownDocument
     let fontSize: Double
@@ -60,6 +61,7 @@ struct NativeMarkdownDocumentView: View {
     }
 }
 
+@MainActor
 private enum MarkdownUIThemeBuilder {
     static func build(for theme: MarkdownTheme, fontSize: Double) -> Theme {
         let tokens = theme.tokens
@@ -237,6 +239,7 @@ private struct FrontMatterDocument {
     }
 }
 
+@MainActor
 private struct YAMLFrontMatterView: View {
     let yaml: String
     let fontSize: Double
@@ -298,6 +301,7 @@ private struct YAMLFrontMatterView: View {
     }
 }
 
+@MainActor
 private struct YAMLValueView: View {
     let value: YAMLValue
     let fontSize: Double

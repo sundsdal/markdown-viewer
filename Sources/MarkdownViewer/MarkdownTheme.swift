@@ -37,7 +37,8 @@ enum MarkdownTheme: String, CaseIterable, Identifiable {
 
     private static let cache = ThemeCache()
 
-    private final class ThemeCache {
+    // The cache is constructed once and then contains only immutable values.
+    private final class ThemeCache: @unchecked Sendable {
         private let entries: [MarkdownTheme: Entry]
 
         init() {

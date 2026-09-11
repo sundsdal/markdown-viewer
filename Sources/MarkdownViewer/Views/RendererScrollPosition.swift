@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 final class RendererScrollPosition: ObservableObject {
     var fraction: CGFloat = 0
     var activeSource: String?
@@ -45,6 +46,10 @@ struct NativeScrollPositionObserver: NSViewRepresentable {
         }
     }
 
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.tearDown()
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(
             source: source,
@@ -53,6 +58,7 @@ struct NativeScrollPositionObserver: NSViewRepresentable {
         )
     }
 
+    @MainActor
     final class Coordinator {
         var source: String
         var scrollPosition: RendererScrollPosition
@@ -68,10 +74,11 @@ struct NativeScrollPositionObserver: NSViewRepresentable {
             self.broadcastsScrollUpdates = broadcastsScrollUpdates
         }
 
-        deinit {
+        func tearDown() {
             if let observer {
                 NotificationCenter.default.removeObserver(observer)
             }
+            observer = nil
         }
 
         func attach(from view: NSView) {
@@ -91,7 +98,9 @@ struct NativeScrollPositionObserver: NSViewRepresentable {
                 object: enclosingScrollView.contentView,
                 queue: .main
             ) { [weak self] _ in
-                self?.recordScrollPosition()
+                Task { @MainActor [weak self] in
+                    self?.recordScrollPosition()
+                }
             }
         }
 

@@ -127,6 +127,10 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
         )
     }
 
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.tearDown()
+    }
+
     final class Coordinator: NSObject, WKScriptMessageHandler {
         var scrollPosition: RendererScrollPosition
         var source: String
@@ -155,10 +159,11 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
             self.synchronizesScroll = synchronizesScroll
         }
 
-        deinit {
+        func tearDown() {
             if let scrollObserver {
                 NotificationCenter.default.removeObserver(scrollObserver)
             }
+            scrollObserver = nil
             webView?.configuration.userContentController.removeScriptMessageHandler(forName: handlerName)
         }
 
@@ -235,7 +240,9 @@ private struct SwiftUIMarkdownBridge: NSViewRepresentable {
                 object: scrollView.contentView,
                 queue: .main
             ) { [weak self] _ in
-                self?.recordNativeScrollPosition()
+                Task { @MainActor [weak self] in
+                    self?.recordNativeScrollPosition()
+                }
             }
         }
 
