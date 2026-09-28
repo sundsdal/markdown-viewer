@@ -286,7 +286,10 @@ enum MarkdownHTMLRenderer {
     // MARK: - Markdown → HTML
 
     private static func markdownToHTML(_ text: String) -> String {
-        let lines = text.components(separatedBy: "\n")
+        let normalizedText = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalizedText.components(separatedBy: "\n")
         var html: [String] = []
         var i = 0
         var inCodeBlock = false
@@ -349,12 +352,15 @@ enum MarkdownHTMLRenderer {
                 while i < lines.count {
                     let ql = lines[i]
                     if ql.trimmingCharacters(in: .whitespaces).hasPrefix(">") {
-                        let content = String(ql.drop(while: { $0 == " " }).dropFirst().drop(while: { $0 == " " }))
+                        let content = String(ql.drop(while: { $0 == " " || $0 == "\t" }).dropFirst().drop(while: { $0 == " " || $0 == "\t" }))
                         quoteLines.append(content)
                         i += 1
                     } else { break }
                 }
-                let renderedQuote = quoteLines.map(inlineMarkdown).joined(separator: "<br>")
+                let renderedQuote = quoteLines
+                    .split(separator: "", omittingEmptySubsequences: false)
+                    .map { renderInlineLines(Array($0)) }
+                    .joined(separator: "<br><br>")
                 html.append("<blockquote>\(renderedQuote)</blockquote>")
                 continue
             }
@@ -375,26 +381,47 @@ enum MarkdownHTMLRenderer {
                     inList = true
                     listType = "ul"
                 }
-                html.append("<li>\(inlineMarkdown(String(trimmed.dropFirst(2))))</li>")
                 i += 1
+                let itemStart = String(line.drop(while: { $0 == " " || $0 == "\t" }).dropFirst(2))
+                var itemLines = [itemStart]
+                while i < lines.count, !startsBlock(lines[i], nextLine: i + 1 < lines.count ? lines[i + 1] : nil) {
+                    itemLines.append(String(lines[i].drop(while: { $0 == " " || $0 == "\t" })))
+                    i += 1
+                }
+                html.append("<li>\(renderInlineLines(itemLines))</li>")
                 continue
             }
 
-            if let range = trimmed.range(of: #"^\d+\.\s"#, options: .regularExpression) {
+            if trimmed.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil {
                 if !inList || listType != "ol" {
                     closeList(&html, &inList, &listType)
                     html.append("<ol>")
                     inList = true
                     listType = "ol"
                 }
-                html.append("<li>\(inlineMarkdown(String(trimmed[range.upperBound...])))</li>")
                 i += 1
+                let itemStart = String(line.drop(while: { $0 == " " || $0 == "\t" }))
+                let itemRange = itemStart.range(of: #"^\d+\.\s"#, options: .regularExpression)!
+                var itemLines = [String(itemStart[itemRange.upperBound...])]
+                while i < lines.count, !startsBlock(lines[i], nextLine: i + 1 < lines.count ? lines[i + 1] : nil) {
+                    itemLines.append(String(lines[i].drop(while: { $0 == " " || $0 == "\t" })))
+                    i += 1
+                }
+                html.append("<li>\(renderInlineLines(itemLines))</li>")
                 continue
             }
 
             closeList(&html, &inList, &listType)
-            html.append("<p>\(inlineMarkdown(trimmed))</p>")
-            i += 1
+            var paragraphLines: [String] = []
+            while i < lines.count {
+                let paragraphLine = lines[i]
+                if startsBlock(paragraphLine, nextLine: i + 1 < lines.count ? lines[i + 1] : nil) {
+                    break
+                }
+                paragraphLines.append(String(paragraphLine.drop(while: { $0 == " " || $0 == "\t" })))
+                i += 1
+            }
+            html.append("<p>\(renderInlineLines(paragraphLines))</p>")
         }
 
         if inCodeBlock {
@@ -502,6 +529,50 @@ enum MarkdownHTMLRenderer {
         guard let firstContentLine = code.split(whereSeparator: \.isNewline).first else { return false }
         let directive = firstContentLine.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return directive.hasPrefix("flowchart ") || directive.hasPrefix("graph ")
+    }
+
+    private static func startsBlock(_ line: String, nextLine: String?) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ||
+            line.hasPrefix("```") ||
+            parseHeading(line) != nil ||
+            isHorizontalRule(trimmed) ||
+            trimmed.hasPrefix(">") ||
+            trimmed.hasPrefix("- ") ||
+            trimmed.hasPrefix("* ") ||
+            trimmed.hasPrefix("+ ") ||
+            trimmed.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil ||
+            (trimmed.contains("|") && nextLine.map(isTableSeparator) == true)
+    }
+
+    /// Markdown source lines normally wrap as a space. Keep explicit Markdown hard breaks
+    /// separate until after inline markup has been parsed so formatting may span source lines.
+    private static func renderInlineLines(_ lines: [String]) -> String {
+        var hardBreak = "\u{E000}"
+        while lines.contains(where: { $0.contains(hardBreak) }) {
+            hardBreak.append("\u{E000}")
+        }
+        var source = ""
+
+        for (index, line) in lines.enumerated() {
+            var content = line
+            let trailingBackslashes = content.reversed().prefix(while: { $0 == "\\" }).count
+            let endsWithBackslash = index < lines.count - 1 && trailingBackslashes % 2 == 1
+            let trailingWhitespace = content.reversed().prefix(while: { $0 == " " }).count
+            let endsWithSpaces = index < lines.count - 1 && trailingWhitespace >= 2
+
+            if endsWithBackslash {
+                content.removeLast()
+            } else if endsWithSpaces {
+                content = String(content.dropLast(trailingWhitespace))
+            }
+            source += content
+
+            guard index < lines.count - 1 else { continue }
+            source += (endsWithBackslash || endsWithSpaces) ? hardBreak : " "
+        }
+
+        return inlineMarkdown(source).replacingOccurrences(of: hardBreak, with: "<br>")
     }
 
     private static func inlineMarkdown(_ text: String) -> String {
