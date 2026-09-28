@@ -589,20 +589,22 @@ enum MarkdownHTMLRenderer {
             sourceOffset += line.utf16.count + 1
         }
 
-        return inlineMarkdown(source).replacingOccurrences(of: hardBreak, with: "<br>")
+        return inlineMarkdown(source, hardBreak: hardBreak).replacingOccurrences(of: hardBreak, with: "<br>")
     }
 
-    private static func inlineMarkdown(_ text: String) -> String {
+    private static func inlineMarkdown(_ text: String, hardBreak: String? = nil) -> String {
         var result = escapeHTML(text)
         result = replaceMarkdownDestinations(
             in: result,
             pattern: #"!\[([^\]]*)\]\(([^)]+)\)"#,
-            isImage: true
+            isImage: true,
+            hardBreak: hardBreak
         )
         result = replaceMarkdownDestinations(
             in: result,
             pattern: #"\[([^\]]+)\]\(([^)]+)\)"#,
-            isImage: false
+            isImage: false,
+            hardBreak: hardBreak
         )
         result = result.replacingOccurrences(
             of: #"\*\*\*(.+?)\*\*\*"#, with: "<strong><em>$1</em></strong>", options: .regularExpression)
@@ -619,7 +621,12 @@ enum MarkdownHTMLRenderer {
         return result
     }
 
-    private static func replaceMarkdownDestinations(in text: String, pattern: String, isImage: Bool) -> String {
+    private static func replaceMarkdownDestinations(
+        in text: String,
+        pattern: String,
+        isImage: Bool,
+        hardBreak: String?
+    ) -> String {
         guard let expression = try? NSRegularExpression(pattern: pattern) else { return text }
         let range = NSRange(text.startIndex..., in: text)
         let matches = expression.matches(in: text, range: range)
@@ -633,11 +640,13 @@ enum MarkdownHTMLRenderer {
 
             let label = String(result[labelRange])
             let destination = String(result[destinationRange])
+            let attributeLabel = hardBreak.map { label.replacingOccurrences(of: $0, with: " ") } ?? label
+            let attributeDestination = hardBreak.map { destination.replacingOccurrences(of: $0, with: " ") } ?? destination
             let replacement: String
-            if isPermittedDestination(destination, isImage: isImage) {
-                let resolvedDestination = normalizeNetworkPathDestination(destination)
+            if isPermittedDestination(attributeDestination, isImage: isImage) {
+                let resolvedDestination = normalizeNetworkPathDestination(attributeDestination)
                 replacement = isImage
-                    ? "<img src=\"\(resolvedDestination)\" alt=\"\(label)\">"
+                    ? "<img src=\"\(resolvedDestination)\" alt=\"\(attributeLabel)\">"
                     : "<a href=\"\(resolvedDestination)\">\(label)</a>"
             } else {
                 replacement = label
