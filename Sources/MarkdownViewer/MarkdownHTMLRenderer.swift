@@ -286,7 +286,10 @@ enum MarkdownHTMLRenderer {
     // MARK: - Markdown → HTML
 
     private static func markdownToHTML(_ text: String) -> String {
-        let lines = text.components(separatedBy: "\n")
+        let normalizedText = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalizedText.components(separatedBy: "\n")
         var html: [String] = []
         var i = 0
         var inCodeBlock = false
@@ -349,12 +352,15 @@ enum MarkdownHTMLRenderer {
                 while i < lines.count {
                     let ql = lines[i]
                     if ql.trimmingCharacters(in: .whitespaces).hasPrefix(">") {
-                        let content = String(ql.drop(while: { $0 == " " }).dropFirst().drop(while: { $0 == " " }))
+                        let content = String(ql.drop(while: { $0 == " " || $0 == "\t" }).dropFirst().drop(while: { $0 == " " || $0 == "\t" }))
                         quoteLines.append(content)
                         i += 1
                     } else { break }
                 }
-                let renderedQuote = quoteLines.map(inlineMarkdown).joined(separator: "<br>")
+                let renderedQuote = quoteLines
+                    .split(separator: "", omittingEmptySubsequences: false)
+                    .map { renderInlineLines(Array($0)) }
+                    .joined(separator: "<br><br>")
                 html.append("<blockquote>\(renderedQuote)</blockquote>")
                 continue
             }
@@ -375,26 +381,47 @@ enum MarkdownHTMLRenderer {
                     inList = true
                     listType = "ul"
                 }
-                html.append("<li>\(inlineMarkdown(String(trimmed.dropFirst(2))))</li>")
                 i += 1
+                let itemStart = String(line.drop(while: { $0 == " " || $0 == "\t" }).dropFirst(2))
+                var itemLines = [itemStart]
+                while i < lines.count, !startsBlock(lines[i], nextLine: i + 1 < lines.count ? lines[i + 1] : nil) {
+                    itemLines.append(String(lines[i].drop(while: { $0 == " " || $0 == "\t" })))
+                    i += 1
+                }
+                html.append("<li>\(renderInlineLines(itemLines))</li>")
                 continue
             }
 
-            if let range = trimmed.range(of: #"^\d+\.\s"#, options: .regularExpression) {
+            if trimmed.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil {
                 if !inList || listType != "ol" {
                     closeList(&html, &inList, &listType)
                     html.append("<ol>")
                     inList = true
                     listType = "ol"
                 }
-                html.append("<li>\(inlineMarkdown(String(trimmed[range.upperBound...])))</li>")
                 i += 1
+                let itemStart = String(line.drop(while: { $0 == " " || $0 == "\t" }))
+                let itemRange = itemStart.range(of: #"^\d+\.\s"#, options: .regularExpression)!
+                var itemLines = [String(itemStart[itemRange.upperBound...])]
+                while i < lines.count, !startsBlock(lines[i], nextLine: i + 1 < lines.count ? lines[i + 1] : nil) {
+                    itemLines.append(String(lines[i].drop(while: { $0 == " " || $0 == "\t" })))
+                    i += 1
+                }
+                html.append("<li>\(renderInlineLines(itemLines))</li>")
                 continue
             }
 
             closeList(&html, &inList, &listType)
-            html.append("<p>\(inlineMarkdown(trimmed))</p>")
-            i += 1
+            var paragraphLines: [String] = []
+            while i < lines.count {
+                let paragraphLine = lines[i]
+                if startsBlock(paragraphLine, nextLine: i + 1 < lines.count ? lines[i + 1] : nil) {
+                    break
+                }
+                paragraphLines.append(String(paragraphLine.drop(while: { $0 == " " || $0 == "\t" })))
+                i += 1
+            }
+            html.append("<p>\(renderInlineLines(paragraphLines))</p>")
         }
 
         if inCodeBlock {
@@ -504,17 +531,80 @@ enum MarkdownHTMLRenderer {
         return directive.hasPrefix("flowchart ") || directive.hasPrefix("graph ")
     }
 
-    private static func inlineMarkdown(_ text: String) -> String {
+    private static func startsBlock(_ line: String, nextLine: String?) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ||
+            line.hasPrefix("```") ||
+            parseHeading(line) != nil ||
+            isHorizontalRule(trimmed) ||
+            trimmed.hasPrefix(">") ||
+            trimmed.hasPrefix("- ") ||
+            trimmed.hasPrefix("* ") ||
+            trimmed.hasPrefix("+ ") ||
+            trimmed.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil ||
+            (trimmed.contains("|") && nextLine.map(isTableSeparator) == true)
+    }
+
+    /// Markdown source lines normally wrap as a space. Keep explicit Markdown hard breaks
+    /// separate until after inline markup has been parsed so formatting may span source lines.
+    private static func renderInlineLines(_ lines: [String]) -> String {
+        var hardBreak = "\u{E000}"
+        while lines.contains(where: { $0.contains(hardBreak) }) {
+            hardBreak.append("\u{E000}")
+        }
+        let originalSource = lines.joined(separator: "\n")
+        let codeSpanRanges: [NSRange]
+        if let expression = try? NSRegularExpression(pattern: #"`[^`]+`"#) {
+            codeSpanRanges = expression.matches(
+                in: originalSource,
+                range: NSRange(originalSource.startIndex..., in: originalSource)
+            ).map(\.range)
+        } else {
+            codeSpanRanges = []
+        }
+        var source = ""
+        var sourceOffset = 0
+
+        for (index, line) in lines.enumerated() {
+            var content = line
+            let boundaryOffset = sourceOffset + line.utf16.count
+            let isInsideCodeSpan = codeSpanRanges.contains { range in
+                boundaryOffset > range.location && boundaryOffset < NSMaxRange(range)
+            }
+            let trailingBackslashes = content.reversed().prefix(while: { $0 == "\\" }).count
+            let endsWithBackslash = !isInsideCodeSpan && index < lines.count - 1 && trailingBackslashes % 2 == 1
+            let trailingWhitespace = content.reversed().prefix(while: { $0 == " " }).count
+            let endsWithSpaces = !isInsideCodeSpan && index < lines.count - 1 && trailingWhitespace >= 2
+
+            if endsWithBackslash {
+                content.removeLast()
+            } else if endsWithSpaces {
+                content = String(content.dropLast(trailingWhitespace))
+            }
+            source += content
+
+            if index < lines.count - 1 {
+                source += (endsWithBackslash || endsWithSpaces) ? hardBreak : " "
+            }
+            sourceOffset += line.utf16.count + 1
+        }
+
+        return inlineMarkdown(source, hardBreak: hardBreak).replacingOccurrences(of: hardBreak, with: "<br>")
+    }
+
+    private static func inlineMarkdown(_ text: String, hardBreak: String? = nil) -> String {
         var result = escapeHTML(text)
         result = replaceMarkdownDestinations(
             in: result,
             pattern: #"!\[([^\]]*)\]\(([^)]+)\)"#,
-            isImage: true
+            isImage: true,
+            hardBreak: hardBreak
         )
         result = replaceMarkdownDestinations(
             in: result,
             pattern: #"\[([^\]]+)\]\(([^)]+)\)"#,
-            isImage: false
+            isImage: false,
+            hardBreak: hardBreak
         )
         result = result.replacingOccurrences(
             of: #"\*\*\*(.+?)\*\*\*"#, with: "<strong><em>$1</em></strong>", options: .regularExpression)
@@ -531,7 +621,12 @@ enum MarkdownHTMLRenderer {
         return result
     }
 
-    private static func replaceMarkdownDestinations(in text: String, pattern: String, isImage: Bool) -> String {
+    private static func replaceMarkdownDestinations(
+        in text: String,
+        pattern: String,
+        isImage: Bool,
+        hardBreak: String?
+    ) -> String {
         guard let expression = try? NSRegularExpression(pattern: pattern) else { return text }
         let range = NSRange(text.startIndex..., in: text)
         let matches = expression.matches(in: text, range: range)
@@ -545,11 +640,13 @@ enum MarkdownHTMLRenderer {
 
             let label = String(result[labelRange])
             let destination = String(result[destinationRange])
+            let attributeLabel = hardBreak.map { label.replacingOccurrences(of: $0, with: " ") } ?? label
+            let attributeDestination = hardBreak.map { destination.replacingOccurrences(of: $0, with: " ") } ?? destination
             let replacement: String
-            if isPermittedDestination(destination, isImage: isImage) {
-                let resolvedDestination = normalizeNetworkPathDestination(destination)
+            if isPermittedDestination(attributeDestination, isImage: isImage) {
+                let resolvedDestination = normalizeNetworkPathDestination(attributeDestination)
                 replacement = isImage
-                    ? "<img src=\"\(resolvedDestination)\" alt=\"\(label)\">"
+                    ? "<img src=\"\(resolvedDestination)\" alt=\"\(attributeLabel)\">"
                     : "<a href=\"\(resolvedDestination)\">\(label)</a>"
             } else {
                 replacement = label
