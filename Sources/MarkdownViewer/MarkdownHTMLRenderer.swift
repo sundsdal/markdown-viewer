@@ -552,14 +552,29 @@ enum MarkdownHTMLRenderer {
         while lines.contains(where: { $0.contains(hardBreak) }) {
             hardBreak.append("\u{E000}")
         }
+        let originalSource = lines.joined(separator: "\n")
+        let codeSpanRanges: [NSRange]
+        if let expression = try? NSRegularExpression(pattern: #"`[^`]+`"#) {
+            codeSpanRanges = expression.matches(
+                in: originalSource,
+                range: NSRange(originalSource.startIndex..., in: originalSource)
+            ).map(\.range)
+        } else {
+            codeSpanRanges = []
+        }
         var source = ""
+        var sourceOffset = 0
 
         for (index, line) in lines.enumerated() {
             var content = line
+            let boundaryOffset = sourceOffset + line.utf16.count
+            let isInsideCodeSpan = codeSpanRanges.contains { range in
+                boundaryOffset > range.location && boundaryOffset < NSMaxRange(range)
+            }
             let trailingBackslashes = content.reversed().prefix(while: { $0 == "\\" }).count
-            let endsWithBackslash = index < lines.count - 1 && trailingBackslashes % 2 == 1
+            let endsWithBackslash = !isInsideCodeSpan && index < lines.count - 1 && trailingBackslashes % 2 == 1
             let trailingWhitespace = content.reversed().prefix(while: { $0 == " " }).count
-            let endsWithSpaces = index < lines.count - 1 && trailingWhitespace >= 2
+            let endsWithSpaces = !isInsideCodeSpan && index < lines.count - 1 && trailingWhitespace >= 2
 
             if endsWithBackslash {
                 content.removeLast()
@@ -568,8 +583,10 @@ enum MarkdownHTMLRenderer {
             }
             source += content
 
-            guard index < lines.count - 1 else { continue }
-            source += (endsWithBackslash || endsWithSpaces) ? hardBreak : " "
+            if index < lines.count - 1 {
+                source += (endsWithBackslash || endsWithSpaces) ? hardBreak : " "
+            }
+            sourceOffset += line.utf16.count + 1
         }
 
         return inlineMarkdown(source).replacingOccurrences(of: hardBreak, with: "<br>")
