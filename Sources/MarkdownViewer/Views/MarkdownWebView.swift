@@ -734,7 +734,7 @@ struct MarkdownWebView: NSViewRepresentable {
                 line-height: 1.65;
                 color: var(--md-fg);
                 background: var(--md-bg);
-                max-width: none;
+                max-width: 720px;
                 margin: 0 auto;
                 padding: 40px;
                 -webkit-font-smoothing: antialiased;
@@ -795,6 +795,11 @@ struct MarkdownWebView: NSViewRepresentable {
                 width: auto;
                 overflow-x: auto;
                 display: block;
+            }
+            body > table {
+                box-sizing: border-box;
+                width: calc(100vw - 80px);
+                margin-inline: calc((100% - (100vw - 80px)) / 2);
             }
             th, td {
                 border: 1px solid var(--md-border);
