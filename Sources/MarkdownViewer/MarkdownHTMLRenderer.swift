@@ -21,7 +21,7 @@ enum MarkdownHTMLRenderer {
                 line-height: 1.65;
                 color: var(--md-fg);
                 background: var(--md-bg);
-                max-width: 720px;
+                max-width: none;
                 margin: 0 auto;
                 padding: 40px;
                 -webkit-font-smoothing: antialiased;
