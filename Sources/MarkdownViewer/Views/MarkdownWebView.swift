@@ -796,6 +796,11 @@ struct MarkdownWebView: NSViewRepresentable {
                 overflow-x: auto;
                 display: block;
             }
+            body > table {
+                box-sizing: border-box;
+                width: calc(100vw - 80px);
+                margin-inline: calc((100% - (100vw - 80px)) / 2);
+            }
             th, td {
                 border: 1px solid var(--md-border);
                 padding: 8px 14px;
