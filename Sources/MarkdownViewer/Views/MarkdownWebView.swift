@@ -93,12 +93,20 @@ struct MarkdownWebView: NSViewRepresentable {
         private var hasFinishedInitialLoad = false
         private var lastReportedHitCount = -1
         private let documentURL: URL?
-        private var activeSchemeTasks = [ObjectIdentifier: ResourceCancellationToken]()
+        private var activeSchemeTasks = [ObjectIdentifier: ActiveSchemeTask]()
 
-        private static let maximumResourceSize = 32 * 1024 * 1024
-        private static let resourceReadChunkSize = 64 * 1024
+        private struct ActiveSchemeTask {
+            let task: any WKURLSchemeTask
+            let cancellationToken: ResourceCancellationToken
+        }
 
-        private final class ResourceCancellationToken: @unchecked Sendable {
+        // Resource reads run on a background queue, so everything they touch must
+        // be nonisolated. Otherwise Swift 6 inserts MainActor executor checks
+        // that trap off the main thread.
+        private nonisolated static let maximumResourceSize = 32 * 1024 * 1024
+        private nonisolated static let resourceReadChunkSize = 64 * 1024
+
+        private nonisolated final class ResourceCancellationToken: @unchecked Sendable {
             private let lock = NSLock()
             private var isCancelled = false
 
@@ -115,7 +123,7 @@ struct MarkdownWebView: NSViewRepresentable {
             }
         }
 
-        private enum ResourceReadError: Error {
+        private nonisolated enum ResourceReadError: Error {
             case notRegularFile
             case tooLarge
             case cancelled
@@ -201,35 +209,26 @@ struct MarkdownWebView: NSViewRepresentable {
         func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
             let taskID = ObjectIdentifier(urlSchemeTask as AnyObject)
             let cancellationToken = ResourceCancellationToken()
-            activeSchemeTasks[taskID] = cancellationToken
-            loadResource(for: urlSchemeTask, id: taskID, cancellationToken: cancellationToken)
-        }
+            activeSchemeTasks[taskID] = ActiveSchemeTask(task: urlSchemeTask, cancellationToken: cancellationToken)
 
-        private func loadResource(
-            for urlSchemeTask: WKURLSchemeTask,
-            id taskID: ObjectIdentifier,
-            cancellationToken: ResourceCancellationToken
-        ) {
+            // Resolve the file on the main actor; only Sendable values cross to
+            // the background read.
+            guard let url = urlSchemeTask.request.url,
+                  let fileURL = resourceURL(for: url) else {
+                finish(id: taskID, cancellationToken: cancellationToken, error: URLError(.fileDoesNotExist))
+                return
+            }
+
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                guard let self,
-                      let url = urlSchemeTask.request.url,
-                      let fileURL = self.resourceURL(for: url) else {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.finish(urlSchemeTask, id: taskID, cancellationToken: cancellationToken, error: URLError(.fileDoesNotExist))
-                    }
-                    return
-                }
-
-                do {
-                    let data = try Self.readResource(at: fileURL, cancellationToken: cancellationToken)
-                    let mimeType = UTType(filenameExtension: fileURL.pathExtension)?.preferredMIMEType
-                        ?? "application/octet-stream"
-                    DispatchQueue.main.async { [weak self] in
-                        self?.finish(urlSchemeTask, id: taskID, cancellationToken: cancellationToken, data: data, mimeType: mimeType)
-                    }
-                } catch {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.finish(urlSchemeTask, id: taskID, cancellationToken: cancellationToken, error: error)
+                let result = Result { try Self.readResource(at: fileURL, cancellationToken: cancellationToken) }
+                let mimeType = UTType(filenameExtension: fileURL.pathExtension)?.preferredMIMEType
+                    ?? "application/octet-stream"
+                DispatchQueue.main.async { [weak self] in
+                    switch result {
+                    case .success(let data):
+                        self?.finish(id: taskID, cancellationToken: cancellationToken, data: data, mimeType: mimeType)
+                    case .failure(let error):
+                        self?.finish(id: taskID, cancellationToken: cancellationToken, error: error)
                     }
                 }
             }
@@ -237,7 +236,7 @@ struct MarkdownWebView: NSViewRepresentable {
 
         func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
             let taskID = ObjectIdentifier(urlSchemeTask as AnyObject)
-            activeSchemeTasks.removeValue(forKey: taskID)?.cancel()
+            activeSchemeTasks.removeValue(forKey: taskID)?.cancellationToken.cancel()
         }
 
         private func resourceURL(for url: URL) -> URL? {
@@ -249,15 +248,25 @@ struct MarkdownWebView: NSViewRepresentable {
             return URL(fileURLWithPath: url.path).resolvingSymlinksInPath()
         }
 
+        /// Removes and returns the task only if it is still the live request for
+        /// this token; stopped or superseded requests must not get callbacks.
+        private func takeActiveTask(
+            id: ObjectIdentifier,
+            cancellationToken: ResourceCancellationToken
+        ) -> (any WKURLSchemeTask)? {
+            guard let active = activeSchemeTasks[id],
+                  active.cancellationToken === cancellationToken else { return nil }
+            activeSchemeTasks.removeValue(forKey: id)
+            return cancellationToken.cancelled ? nil : active.task
+        }
+
         private func finish(
-            _ task: WKURLSchemeTask,
             id: ObjectIdentifier,
             cancellationToken: ResourceCancellationToken,
             data: Data,
             mimeType: String
         ) {
-            guard activeSchemeTasks.removeValue(forKey: id) === cancellationToken,
-                  !cancellationToken.cancelled,
+            guard let task = takeActiveTask(id: id, cancellationToken: cancellationToken),
                   let url = task.request.url else { return }
             task.didReceive(URLResponse(url: url, mimeType: mimeType, expectedContentLength: data.count, textEncodingName: nil))
             task.didReceive(data)
@@ -265,17 +274,15 @@ struct MarkdownWebView: NSViewRepresentable {
         }
 
         private func finish(
-            _ task: WKURLSchemeTask,
             id: ObjectIdentifier,
             cancellationToken: ResourceCancellationToken,
             error: Error
         ) {
-            guard activeSchemeTasks.removeValue(forKey: id) === cancellationToken,
-                  !cancellationToken.cancelled else { return }
+            guard let task = takeActiveTask(id: id, cancellationToken: cancellationToken) else { return }
             task.didFailWithError(error)
         }
 
-        private static func readResource(
+        private nonisolated static func readResource(
             at fileURL: URL,
             cancellationToken: ResourceCancellationToken
         ) throws -> Data {
